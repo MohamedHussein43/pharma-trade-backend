@@ -26,6 +26,8 @@ use Laravel\Sanctum\HasApiTokens;
     'password',
     'remember_token'
 ])]
+
+
 class User extends Authenticatable
 {
     /** @use HasFactory<UserFactory> */
@@ -51,11 +53,49 @@ class User extends Authenticatable
     return $this->hasOne(Pharmacy::class);
 }
 
+public function pharmacyBranch()
+{
+    return $this->hasOne(PharmacyBranch::class, 'user_id');
+    }
+
 public function supplier()
 {
     return $this->hasOne(Supplier::class);
 }
 
+public function notifications()
+    {
+        return $this->hasMany(Notification::class, 'user_id');
+    }
+ 
+    // ── Helpers ──────────────────────────────────────────────
+ 
+    public function isAdmin(): bool
+    {
+        return $this->role === 'admin';
+    }
+ 
+    public function isPharmacy(): bool
+    {
+        return $this->role === 'pharmacy';
+    }
+ 
+    public function isSupplier(): bool
+    {
+        return $this->role === 'supplier';
+    }
+ 
+    public function isActive(): bool
+    {
+        return $this->is_active && $this->status === 'active';
+    }
+
+
+    
+public function reviewedRequests()
+        {
+            return $this->hasMany(RegistrationRequest::class, 'reviewed_by');
+        }
 public function registrationRequests()
 {
     return $this->hasMany(RegistrationRequest::class);
