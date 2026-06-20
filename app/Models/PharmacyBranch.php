@@ -4,7 +4,12 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 
-#[Fillable([
+
+
+
+class PharmacyBranch extends Model
+{
+    protected $fillable = [
     'pharmacy_id',
     'zone_id',
     'user_id',
@@ -16,12 +21,7 @@ use Illuminate\Database\Eloquent\Model;
     'reviewed_by',
     'reviewed_at',
     'is_active',
-])]
-
-
-
-class PharmacyBranch extends Model
-{
+];
      protected function casts(): array
     {
         return [

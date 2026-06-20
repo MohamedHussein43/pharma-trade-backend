@@ -4,13 +4,13 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 
-#[Fillable([
-   'supplier_id',
-    'zone_id',
-])]
 
 class SupplierZone extends Model
 {
+    protected $fillable = [
+        'supplier_id',
+        'zone_id',
+    ];
      protected function casts(): array
     {
         return [

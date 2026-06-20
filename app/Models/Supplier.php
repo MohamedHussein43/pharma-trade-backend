@@ -4,8 +4,11 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 
-#[Fillable([
-    'user_id',
+
+class Supplier extends Model
+{
+    protected $fillable = [
+        'user_id',
     'name',
     'licence_number',
     'min_order_value',
@@ -14,10 +17,7 @@ use Illuminate\Database\Eloquent\Model;
     'reviewed_by',
     'reviewed_at',
     'is_active',
-])]
-
-class Supplier extends Model
-{
+    ];
     protected function casts(): array
     {
         return [

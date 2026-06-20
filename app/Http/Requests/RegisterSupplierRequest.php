@@ -37,8 +37,8 @@ class RegisterSupplierRequest extends FormRequest
             'min_order_value'    => ['nullable', 'numeric', 'min:0'],
             'min_order_qty'      => ['nullable', 'integer', 'min:0'],
             // ── Zone coverage ─────────────────────────────────
-            'zone_ids'           => ['required', 'array', 'min:1'],
-            'zone_ids.*'         => ['integer', 'exists:zones,id'],
+            //'zones'              => ['required', 'array', 'min:1'],
+            //'zones.*'            => ['integer', 'exists:zones,id'],
             // ── Licence images ────────────────────────────────
             'licence_image'      => ['required', 'file', 'mimes:jpg,jpeg,png,heic,pdf', 'max:5120'],
             'licence_image_back' => ['nullable', 'file', 'mimes:jpg,jpeg,png,heic,pdf', 'max:5120'],
@@ -56,8 +56,9 @@ class RegisterSupplierRequest extends FormRequest
             'licence_number.unique' => 'This licence number has already been submitted.',
             'licence_image.required'=> 'A licence image is required for registration.',
             'licence_image.max'     => 'Licence image must not exceed 5MB.',
-            'zone_ids.required'     => 'At least one service zone must be selected.',
-            'zone_ids.*.exists'     => 'One or more selected zones are not valid.',
+            'zones.required'     => 'At least one service zone must be selected.',
+            'zones.min'          => 'At least one service zone must be selected.',
+            'zones.*.exists'     => 'One or more selected zones are not valid.',
         ];
     }
  

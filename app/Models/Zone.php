@@ -4,14 +4,14 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 
-#[Fillable([
-    'name',
-    'governorate',
-    'is_active',
-])]
 
 class Zone extends Model
 {
+    protected $fillable = [
+        'name',
+        'governorate',
+        'is_active',
+    ];
      protected function casts(): array
     {
         return [

@@ -3,18 +3,17 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
-
-#[Fillable([
+class Pharmacy extends Model
+{
+    protected $fillable = [
     'name',
     'licence_number',
     'approval_status',
     'reviewed_by',
     'reviewed_at',
     'is_active',
-])]
+];
 
-class Pharmacy extends Model
-{
      protected function casts(): array
     {
         return [

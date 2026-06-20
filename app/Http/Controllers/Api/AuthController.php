@@ -196,6 +196,14 @@ class AuthController extends Controller
     // =========================================================
     public function registerSupplier(RegisterSupplierRequest $request): JsonResponse
     {
+        
+        
+        if (!$request->zones)
+            {
+                
+                 $request->zones = [1];
+        }  
+                
         try {
             $result = DB::transaction(function () use ($request) {
  
@@ -210,6 +218,7 @@ class AuthController extends Controller
                     'is_active'    => 0,
                     'device_token' => $request->device_token,
                 ]);
+                
  
                 // ── Step 2: Create registration request ──
                 // zone_ids stored as JSON in address field temporarily,
@@ -223,10 +232,12 @@ class AuthController extends Controller
                     'licence_number' => $request->licence_number,
                     'phone'          => $request->phone,
                     'address'        => $request->address,
-                    'zone_id'        => $request->zone_ids[0],        // primary zone (for display)
+                    'zone_id' => is_array($request->zones) 
+                        ? $request->zones[0] 
+                        : json_decode($request->zones)[0],        // primary zone (for display)
                     'status'         => 'pending',
                     'meta'           => json_encode([                  // ALL zones stored here
-                                            'zone_ids'        => $request->zone_ids,
+                                            'zone_ids'        => $request->zones,       // ← changed from zone_ids
                                             'min_order_value' => $request->min_order_value ?? 0,
                                             'min_order_qty'   => $request->min_order_qty   ?? 0,
                                         ]),
