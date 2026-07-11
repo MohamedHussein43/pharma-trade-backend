@@ -125,8 +125,8 @@ class AuthController extends Controller
     {
         try {
             $result = DB::transaction(function () use ($request) {
- 
-                // ── Step 1: Create the user (inactive until approved) ──
+
+                // Step 1: Create user (inactive)
                 $user = User::create([
                     'name'         => $request->name,
                     'email'        => $request->email,
@@ -135,10 +135,11 @@ class AuthController extends Controller
                     'role'         => 'pharmacy',
                     'status'       => 'pending_approval',
                     'is_active'    => 0,
-                    'device_token' => $request->device_token, // optional — sent at register
+                    'device_token' => $request->device_token,
                 ]);
- 
-                // ── Step 2: Create the registration request ──
+
+                // Step 2: Create registration request
+                // Store all zone_ids in meta — same pattern as supplier
                 $regRequest = RegistrationRequest::create([
                     'user_id'        => $user->id,
                     'entity_type'    => 'pharmacy',
@@ -147,23 +148,26 @@ class AuthController extends Controller
                     'licence_number' => $request->licence_number,
                     'phone'          => $request->phone,
                     'address'        => $request->address,
-                    'zone_id'        => $request->zone_id,
+                    'zone_id'        => $request->zone_ids[0], // primary zone for display
+                    'meta'           => json_encode([
+                        'zone_ids' => $request->zone_ids,     // ALL zones stored here
+                    ]),
                     'status'         => 'pending',
                 ]);
- 
-                // ── Step 3: Store licence image(s) ──
+
+                // Step 3: Store licence images
                 $this->storeLicenceImages($request, $regRequest->id);
- 
-                // ── Step 4: Notify all admins ──
+
+                // Step 4: Notify all admins
                 $this->notifyAllAdmins(
                     requestId: $regRequest->id,
                     title:     'New pharmacy licence pending review',
                     body:      "Pharmacy '{$request->business_name}' submitted a registration request.",
                 );
- 
+
                 return ['user' => $user, 'request' => $regRequest];
             });
- 
+
             return response()->json([
                 'message' => 'Registration submitted successfully. Your account is pending admin review.',
                 'data'    => [
@@ -172,7 +176,7 @@ class AuthController extends Controller
                     'submitted_at' => $result['request']['created_at'],
                 ],
             ], 201);
- 
+
         } catch (\Exception $e) {
             return response()->json([
                 'message' => 'Registration failed. Please try again.',

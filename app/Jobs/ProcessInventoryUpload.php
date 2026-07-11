@@ -2,12 +2,9 @@
 
 namespace App\Jobs;
 
-use App\Models\BannedDrug;
 use App\Models\Drug;
 use App\Models\InventoryUploadLog;
 use App\Models\Notification;
-use App\Models\PlatformSetting;
-use App\Models\RejectedInventoryRow;
 use App\Models\Supplier;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -36,17 +33,16 @@ class ProcessInventoryUpload implements ShouldQueue
     // =========================================================
     // handle()
     //
-    // KEY CHANGE FROM V1:
-    //   No row is ever rejected for failing to match the master
-    //   drug catalog. Every row with a valid name, quantity, and
-    //   price is saved. Catalog matching still runs — but only
-    //   to ENRICH the row with a drug_id when possible, never
-    //   to BLOCK it. drug_name_raw is always saved as-is.
+    // NEW FLOW v3:
+    //   For each row in the Excel file:
+    //     1. Validate basic data (name, qty, price)
+    //     2. Try to match drug name to existing drugs table
+    //     3. If NO match → create a new drug row in drugs table
+    //     4. Upsert supplier_inventory using the drug_id
     //
-    //   The ONLY thing that can still reject a row is the
-    //   Phase 2 banned-drug check, and only when an admin has
-    //   turned the feature flag on. With the flag off (default)
-    //   this step is skipped entirely and has zero effect.
+    //   Result: zero drug name duplication across suppliers.
+    //   Every supplier_inventory row always has a valid drug_id.
+    //   drug_name_raw saved as audit reference only.
     // =========================================================
     public function handle(): void
     {
@@ -57,13 +53,11 @@ class ProcessInventoryUpload implements ShouldQueue
         }
 
         try {
-            // Load catalog for best-effort enrichment (not gating)
+            // ── Load drug catalog into memory for matching ────────
+            // One DB query. All matching runs in PHP — fast.
             $drugCatalog = $this->loadDrugCatalog();
 
-            // Load banned drug list — only matters if the flag is on
-            $bannedCheckEnabled = $this->isBannedDrugCheckEnabled();
-            $bannedCatalog      = $bannedCheckEnabled ? $this->loadBannedDrugs() : [];
-
+            // ── Read file ─────────────────────────────────────────
             if (! Storage::disk('private')->exists($this->filePath)) {
                 throw new \Exception("Upload file not found at path: {$this->filePath}");
             }
@@ -76,6 +70,7 @@ class ProcessInventoryUpload implements ShouldQueue
                 throw new \Exception('The uploaded file is empty or could not be read.');
             }
 
+            // Normalise headers
             $headers = array_map(
                 fn($h) => strtolower(trim(str_replace([' ', '-'], '_', (string)$h))),
                 $rows[0]
@@ -86,18 +81,20 @@ class ProcessInventoryUpload implements ShouldQueue
                 fn($row) => count(array_filter(array_map('strval', $row))) > 0
             );
 
-            $totalRows   = count($dataRows);
-            $successRows = 0;
-            $failedRows  = 0;   // only true data errors now — empty name, bad number
-            $rejectedRows = 0;  // banned-drug rejections (Phase 2 only)
-            $errors      = [];
-            $batch       = [];
+            $totalRows    = count($dataRows);
+            $successRows  = 0;
+            $failedRows   = 0;
+            $newDrugsAdded = 0;  // track how many new drugs were created
+            $errors       = [];
+            $batch        = [];
 
             $log->update(['total_rows' => $totalRows]);
 
+            // ── Process each row ──────────────────────────────────
             foreach (array_values($dataRows) as $index => $row) {
                 $rowNum = $index + 2;
 
+                // Map columns
                 $data = [];
                 foreach ($headers as $colIndex => $header) {
                     $data[$header] = isset($row[$colIndex])
@@ -112,14 +109,12 @@ class ProcessInventoryUpload implements ShouldQueue
                     ?? $data['item_name']
                     ?? null;
 
-                $quantity = $data['quantity']  ?? $data['qty']        ?? $data['stock'] ?? '0';
-                $price    = $data['price']     ?? $data['unit_price'] ?? $data['cost']  ?? '0';
-                $discount = $data['discount']  ?? $data['discount_pct'] ?? $data['disc'] ?? '0';
-                $barcode  = $data['barcode']   ?? $data['barcode_number'] ?? $data['ean'] ?? null;
+                $quantity = $data['quantity']   ?? $data['qty']        ?? $data['stock'] ?? '0';
+                $price    = $data['price']      ?? $data['unit_price'] ?? $data['cost']  ?? '0';
+                $discount = $data['discount']   ?? $data['discount_pct'] ?? $data['disc'] ?? '0';
+                $barcode  = $data['barcode']    ?? $data['barcode_number'] ?? null;
 
-                // ── Basic data validity — these are the ONLY rejections
-                // not related to the banned list. A row needs a name,
-                // a non-negative quantity, and a non-negative price.
+                // ── Basic validation ──────────────────────────────
                 if (empty($drugName)) {
                     $errors[] = "Row {$rowNum}: Drug name is empty — row skipped.";
                     $failedRows++;
@@ -140,82 +135,81 @@ class ProcessInventoryUpload implements ShouldQueue
 
                 $discountVal = (float)$discount;
                 if ($discountVal < 0 || $discountVal > 100) {
-                    $errors[] = "Row {$rowNum}: Discount '{$discount}' must be between 0 and 100 for '{$drugName}' — row skipped.";
+                    $errors[] = "Row {$rowNum}: Discount '{$discount}' must be between 0–100 for '{$drugName}' — row skipped.";
                     $failedRows++;
                     continue;
                 }
 
-                // ── Phase 2 — banned drug check (flag-gated) ──────────
-                // This is the ONLY place a legitimately well-formed
-                // row can still be rejected. Skipped entirely when
-                // the flag is off — zero behavior change from that
-                // point on.
-                if ($bannedCheckEnabled) {
-                    $bannedId = $this->matchBannedDrug($drugName, $bannedCatalog);
-                    if ($bannedId) {
-                        RejectedInventoryRow::create([
-                            'supplier_id'    => $this->supplierId,
-                            'upload_log_id'  => $this->logId,
-                            'drug_name_raw'  => $drugName,
-                            'banned_drug_id' => $bannedId,
-                            'quantity'       => (int)$quantity,
-                            'price'          => round((float)$price, 2),
-                        ]);
-
-                        $errors[] = "Row {$rowNum}: '{$drugName}' is on the restricted drug list and was not added.";
-                        $rejectedRows++;
+                // ── Phase 2 banned drug check (flag-gated) ────────
+                if ($this->isBannedDrugCheckEnabled()) {
+                    if ($this->isBannedDrug($drugName)) {
+                        $errors[] = "Row {$rowNum}: '{$drugName}' is on the restricted list — row skipped.";
+                        $failedRows++;
                         continue;
                     }
                 }
 
-                // ── Catalog matching — enrichment only, never gates ──
-                // If we find a match, great — we link drug_id and the
-                // row gets full catalog benefits (search, standard
-                // naming). If not, the row still saves fully using
-                // exactly what the supplier typed in drug_name_raw.
-                $drugId = $this->matchDrug($drugName, $barcode, $drugCatalog);
+                // ── Step 3: Get or create drug in master catalog ──
+                $drugId = $this->getOrCreateDrug(
+                    $drugName,
+                    $barcode,
+                    $drugCatalog,
+                    $newDrugsAdded
+                );
 
+                // Add to batch
                 $batch[] = [
-                    'supplier_id'         => $this->supplierId,
-                    'drug_id'             => $drugId,              // nullable now
-                    'drug_name_raw'       => $drugName,             // always saved
-                    'is_catalog_matched'  => $drugId ? 1 : 0,
-                    'quantity_available'  => (int)$quantity,
-                    'unit_price'          => round((float)$price, 2),
-                    'discount_pct'        => round($discountVal, 2),
-                    'last_updated'        => now(),
-                    'created_at'          => now(),
-                    'updated_at'          => now(),
+                    'supplier_id'        => $this->supplierId,
+                    'drug_id'            => $drugId,
+                    'drug_name_raw'      => $drugName,  // audit reference
+                    'quantity_available' => (int)$quantity,
+                    'unit_price'         => round((float)$price, 2),
+                    'discount_pct'       => round($discountVal, 2),
+                    'last_updated'       => now(),
+                    'created_at'         => now(),
+                    'updated_at'         => now(),
                 ];
 
                 $successRows++;
 
+                // Flush every 100 rows
                 if (count($batch) >= 100) {
                     $this->flushBatch($batch);
                     $batch = [];
-
                     $log->update([
                         'success_rows' => $successRows,
-                        'failed_rows'  => $failedRows + $rejectedRows,
+                        'failed_rows'  => $failedRows,
                     ]);
                 }
             }
 
+            // Flush remaining
             if (! empty($batch)) {
                 $this->flushBatch($batch);
             }
 
+            // Build summary message including new drugs count
+            $summaryNote = $newDrugsAdded > 0
+                ? " {$newDrugsAdded} new drug(s) were added to the master catalog automatically."
+                : null;
+
             $log->update([
                 'total_rows'   => $totalRows,
                 'success_rows' => $successRows,
-                'failed_rows'  => $failedRows + $rejectedRows,
+                'failed_rows'  => $failedRows,
                 'status'       => 'completed',
                 'error_log'    => ! empty($errors)
-                    ? json_encode($errors, JSON_UNESCAPED_UNICODE)
-                    : null,
+                    ? json_encode(
+                        array_merge(
+                            $errors,
+                            $summaryNote ? [$summaryNote] : []
+                        ),
+                        JSON_UNESCAPED_UNICODE
+                      )
+                    : ($summaryNote ? json_encode([$summaryNote]) : null),
             ]);
 
-            $this->notifySupplier($successRows, $failedRows, $rejectedRows);
+            $this->notifySupplier($successRows, $failedRows, $newDrugsAdded);
 
             Storage::disk('private')->delete($this->filePath);
 
@@ -223,7 +217,6 @@ class ProcessInventoryUpload implements ShouldQueue
             Log::error("ProcessInventoryUpload failed: " . $e->getMessage(), [
                 'supplier_id' => $this->supplierId,
                 'log_id'      => $this->logId,
-                'file'        => $this->filePath,
             ]);
 
             $log?->update([
@@ -232,14 +225,13 @@ class ProcessInventoryUpload implements ShouldQueue
             ]);
 
             $this->notifySupplierFailed();
-
             throw $e;
         }
     }
 
     public function failed(\Throwable $exception): void
     {
-        Log::critical("ProcessInventoryUpload permanently failed after {$this->tries} tries", [
+        Log::critical("ProcessInventoryUpload permanently failed", [
             'supplier_id' => $this->supplierId,
             'log_id'      => $this->logId,
             'error'       => $exception->getMessage(),
@@ -250,112 +242,151 @@ class ProcessInventoryUpload implements ShouldQueue
     }
 
     // =========================================================
-    // Catalog loading — used ONLY for enrichment, not gating
+    // PRIVATE — Load drug catalog into memory
+    // Returns multiple lookup maps for fast in-memory matching
     // =========================================================
     private function loadDrugCatalog(): array
     {
-        $drugs = Drug::where('is_active', 1)
-            ->select(['id', 'name', 'trade_name', 'scientific_name', 'barcode'])
+        $drugs = Drug::select(['id', 'name', 'trade_name', 'scientific_name', 'barcode'])
             ->get();
 
-        $catalog = ['by_barcode' => [], 'by_trade' => [], 'by_name' => []];
+        $catalog = [
+            'by_barcode' => [],
+            'by_trade'   => [],
+            'by_name'    => [],
+        ];
 
         foreach ($drugs as $drug) {
-            if (! empty($drug->barcode))    $catalog['by_barcode'][strtolower($drug->barcode)]    = $drug->id;
-            if (! empty($drug->trade_name)) $catalog['by_trade'][strtolower($drug->trade_name)]    = $drug->id;
-            if (! empty($drug->name))       $catalog['by_name'][strtolower($drug->name)]           = $drug->id;
+            if (! empty($drug->barcode)) {
+                $catalog['by_barcode'][strtolower($drug->barcode)] = $drug->id;
+            }
+            if (! empty($drug->trade_name)) {
+                $catalog['by_trade'][strtolower($drug->trade_name)] = $drug->id;
+            }
+            if (! empty($drug->name)) {
+                $catalog['by_name'][strtolower($drug->name)] = $drug->id;
+            }
         }
 
         return $catalog;
     }
 
-    private function matchDrug(string $drugName, ?string $barcode, array $catalog): ?int
-    {
-        if (! empty($barcode)) {
-            $key = strtolower(trim($barcode));
-            if (isset($catalog['by_barcode'][$key])) return $catalog['by_barcode'][$key];
-        }
-
+    // =========================================================
+    // PRIVATE — Get existing drug OR create a new one
+    //
+    // This is the core change in v3:
+    //   - Try to match the drug name to an existing drugs row
+    //   - If found → return its ID (no duplication)
+    //   - If not found → INSERT a new row into drugs table
+    //     with drug_name_raw as trade_name, then return new ID
+    //
+    // The $catalog array is passed by reference so newly created
+    // drugs are added to the in-memory map immediately — if the
+    // same drug name appears twice in the file, the second row
+    // finds it in memory instead of creating a duplicate.
+    // =========================================================
+    private function getOrCreateDrug(
+        string  $drugName,
+        ?string $barcode,
+        array   &$catalog,   // passed by reference — updated in place
+        int     &$newDrugsAdded
+    ): int {
         $searchName = strtolower(trim($drugName));
 
-        if (isset($catalog['by_trade'][$searchName])) return $catalog['by_trade'][$searchName];
-        if (isset($catalog['by_name'][$searchName]))  return $catalog['by_name'][$searchName];
+        // Strategy 1 — Barcode exact match
+        if (! empty($barcode)) {
+            $key = strtolower(trim($barcode));
+            if (isset($catalog['by_barcode'][$key])) {
+                return $catalog['by_barcode'][$key];
+            }
+        }
 
+        // Strategy 2 — Exact trade name match
+        if (isset($catalog['by_trade'][$searchName])) {
+            return $catalog['by_trade'][$searchName];
+        }
+
+        // Strategy 3 — Exact Arabic name match
+        if (isset($catalog['by_name'][$searchName])) {
+            return $catalog['by_name'][$searchName];
+        }
+
+        // Strategy 4 — Partial trade name match
+        // "Amoxil 500mg" matches existing trade_name "Amoxil"
         foreach ($catalog['by_trade'] as $tradeName => $drugId) {
-            if (str_starts_with($searchName, $tradeName) || str_starts_with($tradeName, $searchName)) {
+            if (str_starts_with($searchName, $tradeName)
+                || str_starts_with($tradeName, $searchName)) {
                 return $drugId;
             }
         }
 
+        // Strategy 5 — First word match (base drug name)
         $firstWord = explode(' ', $searchName)[0];
         if (strlen($firstWord) >= 4) {
             foreach ($catalog['by_trade'] as $tradeName => $drugId) {
-                if (str_starts_with($tradeName, $firstWord)) return $drugId;
+                if (str_starts_with($tradeName, $firstWord)) {
+                    return $drugId;
+                }
             }
         }
 
-        return null; // No match — row still saves, just unenriched
+        // ── No match found — create new drug in master catalog ──
+        $newDrug = Drug::create([
+            'name'       => $drugName,   // use raw name as display name
+            'trade_name' => $drugName,   // also set as trade_name for searching
+            'is_active'  => 1,
+        ]);
+
+        // Add to in-memory catalog so duplicates in same file
+        // are caught without hitting the DB again
+        $catalog['by_trade'][strtolower($drugName)] = $newDrug->id;
+        $catalog['by_name'][strtolower($drugName)]  = $newDrug->id;
+
+        $newDrugsAdded++;
+
+        return $newDrug->id;
     }
 
     // =========================================================
-    // Phase 2 — Feature flag check
-    // Reads the single-row platform_settings table.
-    // Defaults to OFF (false) if the row is somehow missing.
+    // PRIVATE — Batch upsert using (supplier_id, drug_id)
     // =========================================================
-    private function isBannedDrugCheckEnabled(): bool
-    {
-        $setting = PlatformSetting::first();
-        return $setting ? (bool)$setting->enable_banned_drug_check : false;
-    }
-
-    // =========================================================
-    // Phase 2 — Load the banned drug list into memory
-    // Only called when the flag is on.
-    // =========================================================
-    private function loadBannedDrugs(): array
-    {
-        return BannedDrug::where('is_active', 1)
-            ->pluck('id', 'drug_name')
-            ->mapWithKeys(fn($id, $name) => [strtolower($name) => $id])
-            ->toArray();
-    }
-
-    // =========================================================
-    // Phase 2 — Check a drug name against the banned list
-    // Simple substring match — a banned entry "Tramadol" will
-    // catch "Tramadol 50mg", "Tramadol Hydrochloride", etc.
-    // =========================================================
-    private function matchBannedDrug(string $drugName, array $bannedCatalog): ?int
-    {
-        $searchName = strtolower(trim($drugName));
-
-        foreach ($bannedCatalog as $bannedName => $bannedId) {
-            if (str_contains($searchName, $bannedName)) {
-                return $bannedId;
-            }
-        }
-
-        return null;
-    }
-
     private function flushBatch(array $batch): void
     {
         DB::table('supplier_inventory')->upsert(
             $batch,
-            ['supplier_id', 'drug_name_raw'],
-            ['drug_id', 'is_catalog_matched', 'quantity_available',
-             'unit_price', 'discount_pct', 'last_updated', 'updated_at']
+            ['supplier_id', 'drug_id'],
+            ['drug_name_raw', 'quantity_available', 'unit_price',
+             'discount_pct', 'last_updated', 'updated_at']
         );
     }
 
-    private function notifySupplier(int $success, int $failed, int $rejected): void
+    // =========================================================
+    // PRIVATE — Phase 2 banned drug check
+    // =========================================================
+    private function isBannedDrugCheckEnabled(): bool
+    {
+        $setting = \App\Models\PlatformSetting::first();
+        return $setting ? (bool)$setting->enable_banned_drug_check : false;
+    }
+
+    private function isBannedDrug(string $drugName): bool
+    {
+        return \App\Models\BannedDrug::where('is_active', 1)
+            ->whereRaw('LOWER(drug_name) LIKE ?', ['%' . strtolower($drugName) . '%'])
+            ->exists();
+    }
+
+    // =========================================================
+    // PRIVATE — Notifications
+    // =========================================================
+    private function notifySupplier(int $success, int $failed, int $newDrugs): void
     {
         $supplier = Supplier::with('user')->find($this->supplierId);
         if (! $supplier?->user) return;
 
-        $parts = ["{$success} drugs updated successfully."];
-        if ($failed > 0)   $parts[] = "{$failed} rows had invalid data.";
-        if ($rejected > 0) $parts[] = "{$rejected} rows were restricted and not added.";
+        $parts = ["{$success} drugs updated in your inventory."];
+        if ($newDrugs > 0) $parts[] = "{$newDrugs} new drug(s) were added to the platform catalog.";
+        if ($failed > 0)   $parts[] = "{$failed} rows had errors — check upload history.";
 
         Notification::create([
             'user_id'         => $supplier->user->id,

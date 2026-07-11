@@ -28,20 +28,19 @@ class RegisterPharmacyRequest extends FormRequest
             'name'                  => ['required', 'string', 'min:3', 'max:150'],
             'email'                 => ['required', 'email', 'unique:users,email'],
             'phone'                 => ['required', 'string', 'unique:users,phone', 'regex:/^(\+20|0)[0-9]{10}$/'],
-            'password_confirmation' => ['required', 'string', 'min:8'],
             'password'              => ['required', 'string', 'min:8', 'confirmed'],
             // ── Pharmacy / business fields ────────────────────
             'business_name'         => ['required', 'string', 'min:3', 'max:200'],
             'licence_number'        => ['required', 'string', 'unique:registration_requests,licence_number'],
             'address'               => ['required', 'string', 'min:10', 'max:500'],
-            'zone_id'               => ['required', 'integer', 'exists:zones,id'],
+            // ── Zones — now an array ──────────────────────────
+            'zone_ids'              => ['required', 'array', 'min:1'],
+            'zone_ids.*'            => ['integer', 'exists:zones,id'],
             // ── Licence images ────────────────────────────────
-            'licence_image'         => ['required', 'file', 'mimes:jpg,jpeg,png,heic,pdf', 'max:5120'], // 5MB
+            'licence_image'         => ['required', 'file', 'mimes:jpg,jpeg,png,heic,pdf', 'max:5120'],
             'licence_image_back'    => ['nullable', 'file', 'mimes:jpg,jpeg,png,heic,pdf', 'max:5120'],
-            // ── Optional device token for push ────────────────
+            // ── Push notifications ────────────────────────────
             'device_token'          => ['nullable', 'string', 'max:255'],
-
-            
         ];
     }
 
@@ -54,11 +53,13 @@ class RegisterPharmacyRequest extends FormRequest
             'licence_number.unique'     => 'This licence number has already been submitted.',
             'licence_image.required'    => 'A licence image is required for registration.',
             'licence_image.max'         => 'Licence image must not exceed 5MB.',
-            'zone_id.exists'            => 'The selected zone is not valid.',
-            'password.confirmed'        => 'Password confirmation does not match.',
-            'password.min'              => 'Password must be at least 8 characters.',
+            'zone_ids.required'         => 'At least one zone must be selected.',
+            'zone_ids.min'              => 'At least one zone must be selected.',
+            'zone_ids.*.exists'         => 'One or more selected zones are not valid.',
             'address.required'          => 'The pharmacy address is required.',
             'address.min'               => 'Address must be at least 10 characters.',
+            'password.confirmed'        => 'Password confirmation does not match.',
+            'password.min'              => 'Password must be at least 8 characters.',
         ];
     }
 

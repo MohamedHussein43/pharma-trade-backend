@@ -7,11 +7,11 @@ use Illuminate\Database\Eloquent\Model;
 class SupplierInventory extends Model
 {
     protected $table = 'supplier_inventory';
+
     protected $fillable = [
         'supplier_id',
-        'drug_id',              // nullable now — catalog match optional
-        'drug_name_raw',        // always set — exactly what supplier typed
-        'is_catalog_matched',   // 1 if drug_id was successfully matched
+        'drug_id',           // always set — NOT NULL
+        'drug_name_raw',     // audit only — what supplier originally typed
         'quantity_available',
         'unit_price',
         'discount_pct',
@@ -23,7 +23,6 @@ class SupplierInventory extends Model
         'unit_price'         => 'decimal:2',
         'discount_pct'       => 'decimal:2',
         'last_updated'       => 'datetime',
-        'is_catalog_matched' => 'boolean',
     ];
 
     public function supplier()
@@ -38,12 +37,11 @@ class SupplierInventory extends Model
 
     public function effectivePrice(): float
     {
-        return $this->unit_price * (1 - $this->discount_pct / 100);
+        return round($this->unit_price * (1 - $this->discount_pct / 100), 2);
     }
 
     public function displayName(): string
     {
-        // Prefer the catalog trade name if matched, fall back to raw
-        return $this->drug?->trade_name ?? $this->drug_name_raw;
+        return $this->drug?->trade_name ?? $this->drug_name_raw ?? '';
     }
 }

@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Jobs\ProcessInventoryUpload;
 use App\Models\InventoryUploadLog;
 use App\Models\SupplierInventory;
+use App\Models\Drug;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -119,6 +120,10 @@ class SupplierInventoryController extends Controller
     // If drug_name_raw changes, we re-attempt catalog matching
     // so the drug_id stays as accurate as possible.
     // =========================================================
+    // =========================================================
+    // PUT /api/v1/supplier/inventory/{id}
+    // Updated to check drug_id conflict instead of drug_name_raw
+    // =========================================================
     public function update(Request $request, int $id): JsonResponse
     {
         $supplier = $request->user()->supplier;
@@ -128,9 +133,7 @@ class SupplierInventoryController extends Controller
             ->first();
 
         if (! $item) {
-            return response()->json([
-                'message' => 'Inventory item not found.',
-            ], 404);
+            return response()->json(['message' => 'Inventory item not found.'], 404);
         }
 
         $request->validate([
@@ -138,66 +141,49 @@ class SupplierInventoryController extends Controller
             'quantity_available' => ['sometimes', 'integer', 'min:0'],
             'unit_price'         => ['sometimes', 'numeric', 'min:0'],
             'discount_pct'       => ['sometimes', 'numeric', 'min:0', 'max:100'],
-        ], [
-            'drug_name_raw.min'       => 'Drug name must be at least 2 characters.',
-            'quantity_available.min'  => 'Quantity cannot be negative.',
-            'unit_price.min'          => 'Price cannot be negative.',
-            'discount_pct.min'        => 'Discount cannot be negative.',
-            'discount_pct.max'        => 'Discount cannot exceed 100%.',
         ]);
 
         $updateData = [];
 
-        // ── Handle drug name change ───────────────────────────
-        // If the supplier corrects/changes the drug name,
-        // check if the new name conflicts with another row they
-        // already have (unique constraint: supplier_id + drug_name_raw)
+        // Handle drug name change
         if ($request->filled('drug_name_raw')
             && $request->drug_name_raw !== $item->drug_name_raw
         ) {
-            $nameExists = SupplierInventory::where('supplier_id', $supplier->id)
-                ->where('drug_name_raw', $request->drug_name_raw)
+            // Get or create the drug for the new name
+            $drug = $this->getOrCreateDrug($request->drug_name_raw);
+
+            // Check this supplier doesn't already have this drug
+            $drugExists = SupplierInventory::where('supplier_id', $supplier->id)
+                ->where('drug_id', $drug->id)
                 ->where('id', '!=', $id)
                 ->exists();
 
-            if ($nameExists) {
+            if ($drugExists) {
                 return response()->json([
-                    'message' => 'You already have another inventory row with this drug name.',
-                    'errors'  => [
-                        'drug_name_raw' => ['This drug name already exists in your inventory.'],
-                    ],
+                    'message' => 'You already have this drug in your inventory.',
+                    'errors'  => ['drug_name_raw' => ['This drug already exists in your inventory.']],
                 ], 422);
             }
 
+            $updateData['drug_id']       = $drug->id;
             $updateData['drug_name_raw'] = $request->drug_name_raw;
-
-            // Re-attempt catalog matching with the new name
-            $newDrugId = $this->attemptCatalogMatch($request->drug_name_raw);
-            $updateData['drug_id']            = $newDrugId;
-            $updateData['is_catalog_matched']  = $newDrugId ? 1 : 0;
         }
 
-        // ── Update numeric fields ─────────────────────────────
         if ($request->has('quantity_available')) {
             $updateData['quantity_available'] = (int)$request->quantity_available;
         }
-
         if ($request->has('unit_price')) {
             $updateData['unit_price'] = round((float)$request->unit_price, 2);
         }
-
         if ($request->has('discount_pct')) {
             $updateData['discount_pct'] = round((float)$request->discount_pct, 2);
         }
 
         if (empty($updateData)) {
-            return response()->json([
-                'message' => 'No changes provided.',
-            ], 422);
+            return response()->json(['message' => 'No changes provided.'], 422);
         }
 
         $updateData['last_updated'] = now();
-
         $item->update($updateData);
 
         return response()->json([
@@ -248,68 +234,71 @@ class SupplierInventoryController extends Controller
             ],
         ], 200);
     }
-
-    // =========================================================
+ // =========================================================
     // POST /api/v1/supplier/inventory
-    // Middleware: auth:sanctum + active.user + role:supplier
-    //
-    // Supplier manually adds a single drug to their inventory
-    // without uploading a file. Useful for adding a new product
-    // between upload cycles.
+    // Manually add a single drug — uses get-or-create
     // =========================================================
-    public function store(Request $request): JsonResponse
-    {
-        $supplier = $request->user()->supplier;
+public function store(Request $request): JsonResponse
+{
+    $supplier = $request->user()->supplier;
 
-        if (! $supplier) {
-            return response()->json(['message' => 'Supplier account not found.'], 404);
-        }
-
-        $request->validate([
-            'drug_name_raw'      => ['required', 'string', 'min:2', 'max:255'],
-            'quantity_available' => ['required', 'integer', 'min:0'],
-            'unit_price'         => ['required', 'numeric', 'min:0'],
-            'discount_pct'       => ['nullable', 'numeric', 'min:0', 'max:100'],
-        ], [
-            'drug_name_raw.required'      => 'Drug name is required.',
-            'quantity_available.required' => 'Quantity is required.',
-            'unit_price.required'         => 'Price is required.',
-            'discount_pct.max'            => 'Discount cannot exceed 100%.',
-        ]);
-
-        // Check for duplicate
-        $exists = SupplierInventory::where('supplier_id', $supplier->id)
-            ->where('drug_name_raw', $request->drug_name_raw)
-            ->exists();
-
-        if ($exists) {
-            return response()->json([
-                'message' => 'This drug already exists in your inventory. Use the edit option to update it.',
-                'errors'  => [
-                    'drug_name_raw' => ['This drug name already exists in your inventory.'],
-                ],
-            ], 422);
-        }
-
-        // Attempt catalog matching
-        $drugId = $this->attemptCatalogMatch($request->drug_name_raw);
-
-        $item = SupplierInventory::create([
-            'supplier_id'        => $supplier->id,
-            'drug_id'            => $drugId,
-            'drug_name_raw'      => $request->drug_name_raw,
-            'is_catalog_matched' => $drugId ? 1 : 0,
-            'quantity_available' => (int)$request->quantity_available,
-            'unit_price'         => round((float)$request->unit_price, 2),
-            'discount_pct'       => round((float)($request->discount_pct ?? 0), 2),
-            'last_updated'       => now(),
-        ]);
-
-        return response()->json([
-            'message' => 'Drug added to inventory successfully.',
-            'data'    => $this->formatItem($item->load('drug')),
-        ], 201);
+    if (! $supplier) {
+        return response()->json(['message' => 'Supplier account not found.'], 404);
     }
+
+    $request->validate([
+        // Either drug_id OR drug_name_raw must be provided
+        'drug_id'            => ['required_without:drug_name_raw', 'integer', 'exists:drugs,id'],
+        'drug_name_raw'      => ['required_without:drug_id', 'string', 'min:2', 'max:255'],
+        'quantity_available' => ['required', 'integer', 'min:0'],
+        'unit_price'         => ['required', 'numeric', 'min:0'],
+        'discount_pct'       => ['nullable', 'numeric', 'min:0', 'max:100'],
+    ], [
+        'drug_id.required_without'       => 'Either a drug selection or drug name is required.',
+        'drug_name_raw.required_without' => 'Either a drug selection or drug name is required.',
+        'drug_id.exists'                 => 'Selected drug does not exist in the catalog.',
+        'quantity_available.required'    => 'Quantity is required.',
+        'unit_price.required'            => 'Price is required.',
+        'discount_pct.max'               => 'Discount cannot exceed 100%.',
+    ]);
+
+    // Path A — supplier picked from dropdown (drug_id provided)
+    if ($request->filled('drug_id')) {
+        $drug = Drug::find($request->drug_id);
+    } else {
+        // Path B — supplier typed a name manually (get or create)
+        $drug = $this->getOrCreateDrug($request->drug_name_raw);
+    }
+
+    // Check duplicate
+    $exists = SupplierInventory::where('supplier_id', $supplier->id)
+        ->where('drug_id', $drug->id)
+        ->exists();
+
+    if ($exists) {
+        return response()->json([
+            'message' => 'This drug already exists in your inventory. Use the edit option to update it.',
+            'errors'  => [
+                'drug_id' => ['This drug already exists in your inventory.'],
+            ],
+        ], 422);
+    }
+
+    $item = SupplierInventory::create([
+        'supplier_id'        => $supplier->id,
+        'drug_id'            => $drug->id,
+        'drug_name_raw'      => $request->drug_name_raw ?? $drug->trade_name,
+        'quantity_available' => (int)$request->quantity_available,
+        'unit_price'         => round((float)$request->unit_price, 2),
+        'discount_pct'       => round((float)($request->discount_pct ?? 0), 2),
+        'last_updated'       => now(),
+    ]);
+
+    return response()->json([
+        'message' => 'Drug added to inventory successfully.',
+        'data'    => $this->formatItem($item->load('drug')),
+    ], 201);
+}
 
     // =========================================================
     // DELETE /api/v1/supplier/inventory/{id}
@@ -502,4 +491,36 @@ class SupplierInventoryController extends Controller
 
         return response()->json(['message' => 'Upload history retrieved.', 'data' => $logs], 200);
     }
+
+      private function getOrCreateDrug(string $drugName): Drug
+    {
+        $searchName = strtolower(trim($drugName));
+
+        // Try exact trade name match
+        $drug = Drug::where('is_active', 1)
+            ->whereRaw('LOWER(trade_name) = ?', [$searchName])
+            ->first();
+        if ($drug) return $drug;
+
+        // Try exact name match
+        $drug = Drug::where('is_active', 1)
+            ->whereRaw('LOWER(name) = ?', [$searchName])
+            ->first();
+        if ($drug) return $drug;
+
+        // Try partial match
+        $drug = Drug::where('is_active', 1)
+            ->whereRaw('LOWER(trade_name) LIKE ?', [$searchName . '%'])
+            ->first();
+        if ($drug) return $drug;
+
+        // Not found — create a new drug in the master catalog
+        return Drug::create([
+            'name'       => $drugName,
+            'trade_name' => $drugName,
+            'is_active'  => 1,
+        ]);
+    }
+
+
 }

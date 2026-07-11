@@ -300,11 +300,13 @@ class AdminRegistrationController extends Controller
             'is_active'       => 1,
         ]);
 
-        // Create the first branch automatically
-        // (pharmacy always has at least one branch)
-        PharmacyBranch::create([
+        // Get all zone IDs from meta, fallback to primary zone_id
+        $meta    = is_string($req->meta) ? json_decode($req->meta, true) : ($req->meta ?? []);
+        $zoneIds = $meta['zone_ids'] ?? ($req->zone_id ? [$req->zone_id] : []);
+
+        // Create the main branch WITHOUT zone_id column
+        $branch = PharmacyBranch::create([
             'pharmacy_id'     => $pharmacy->id,
-            'zone_id'         => $req->zone_id,
             'user_id'         => $req->user_id,
             'name'            => $req->business_name . ' — Main Branch',
             'licence_number'  => $req->licence_number,
@@ -316,14 +318,27 @@ class AdminRegistrationController extends Controller
             'is_active'       => 1,
         ]);
 
+        // Create one pharmacy_branch_zones row per zone
+        foreach ($zoneIds as $zoneId) {
+            \App\Models\PharmacyBranchZone::create([
+                'branch_id'  => $branch->id,
+                'zone_id'    => (int)$zoneId,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
         return $pharmacy->id;
     }
 
     private function createPharmacyBranch(RegistrationRequest $req, User $admin): int
     {
+        $meta    = is_string($req->meta) ? json_decode($req->meta, true) : ($req->meta ?? []);
+        $zoneIds = $meta['zone_ids'] ?? ($req->zone_id ? [$req->zone_id] : []);
+
+        // Create branch WITHOUT zone_id column
         $branch = PharmacyBranch::create([
             'pharmacy_id'     => $req->pharmacy_id,
-            'zone_id'         => $req->zone_id,
             'user_id'         => $req->user_id,
             'name'            => $req->business_name,
             'licence_number'  => $req->licence_number,
@@ -334,6 +349,16 @@ class AdminRegistrationController extends Controller
             'reviewed_at'     => now(),
             'is_active'       => 1,
         ]);
+
+        // Create zone pivot rows
+        foreach ($zoneIds as $zoneId) {
+            \App\Models\PharmacyBranchZone::create([
+                'branch_id'  => $branch->id,
+                'zone_id'    => (int)$zoneId,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
 
         return $branch->id;
     }
