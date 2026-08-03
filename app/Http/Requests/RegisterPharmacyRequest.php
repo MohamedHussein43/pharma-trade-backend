@@ -34,8 +34,8 @@ class RegisterPharmacyRequest extends FormRequest
             'licence_number'        => ['required', 'string', 'unique:registration_requests,licence_number'],
             'address'               => ['required', 'string', 'min:10', 'max:500'],
             // ── Zones — now an array ──────────────────────────
-            'zone_ids'              => ['required', 'array', 'min:1'],
-            'zone_ids.*'            => ['integer', 'exists:zones,id'],
+            'zones'              => ['required', 'array', 'min:1'],
+            'zones.*'            => ['integer', 'exists:zones,id'],
             // ── Licence images ────────────────────────────────
             'licence_image'         => ['required', 'file', 'mimes:jpg,jpeg,png,heic,pdf', 'max:5120'],
             'licence_image_back'    => ['nullable', 'file', 'mimes:jpg,jpeg,png,heic,pdf', 'max:5120'],

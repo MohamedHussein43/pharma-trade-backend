@@ -22,6 +22,11 @@ class MasterOrder extends Model
 
     // ── Relationships ────────────────────────────────────────
 
+    public function orderItems()
+    {
+        return $this->hasMany(OrderItem::class, 'master_order_id');
+    }
+
     public function pharmacyBranch()
     {
         return $this->belongsTo(PharmacyBranch::class, 'pharmacy_branch_id');

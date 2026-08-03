@@ -40,7 +40,12 @@ class Supplier extends Model
  
     public function zones()
     {
-        return $this->hasMany(SupplierZone::class, 'supplier_id');
+        return $this->belongsToMany(
+            Zone::class,
+            'supplier_zones',
+            'supplier_id',
+            'zone_id'
+        );
     }
  
     public function inventory()

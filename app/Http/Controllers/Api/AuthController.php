@@ -148,9 +148,11 @@ class AuthController extends Controller
                     'licence_number' => $request->licence_number,
                     'phone'          => $request->phone,
                     'address'        => $request->address,
-                    'zone_id'        => $request->zone_ids[0], // primary zone for display
+                    'zone_id'        => is_array($request->zones) 
+                                                            ? $request->zones[0] 
+                                                            : json_decode($request->zones)[0], // primary zone for display
                     'meta'           => json_encode([
-                        'zone_ids' => $request->zone_ids,     // ALL zones stored here
+                        'zone_ids' => $request->zones,     // ALL zones stored here
                     ]),
                     'status'         => 'pending',
                 ]);

@@ -18,10 +18,9 @@ class SupplierInventoryController extends Controller
     // optionally show a small indicator on unmatched rows —
     // purely informational, never blocks anything.
     // =========================================================
-     public function index(Request $request): JsonResponse
+        public function index(Request $request): JsonResponse
     {
         $supplier = $request->user()->supplier;
-
         if (! $supplier) {
             return response()->json(['message' => 'Supplier account not found.'], 404);
         }
@@ -44,18 +43,14 @@ class SupplierInventoryController extends Controller
             $query->where('quantity_available', '>', 0);
         }
 
-        $inventory = $query
-            ->orderBy('last_updated', 'desc')
+        $inventory = $query->orderBy('last_updated', 'desc')
             ->paginate($request->get('per_page', 30));
 
-        $inventory->getCollection()->transform(function ($item) {
-            return $this->formatItem($item);
-        });
+        $inventory->getCollection()->transform(fn($item) => $this->formatItem($item));
 
-        $lastUpload = \App\Models\InventoryUploadLog::where('supplier_id', $supplier->id)
+        $lastUpload = InventoryUploadLog::where('supplier_id', $supplier->id)
             ->whereIn('status', ['completed', 'processing'])
-            ->latest()
-            ->first();
+            ->latest()->first();
 
         return response()->json([
             'message' => 'Inventory retrieved successfully.',
@@ -73,6 +68,7 @@ class SupplierInventoryController extends Controller
         ], 200);
     }
 
+
     // =========================================================
     // GET /api/v1/supplier/inventory/{id}
     // Middleware: auth:sanctum + active.user + role:supplier
@@ -80,19 +76,15 @@ class SupplierInventoryController extends Controller
     // Returns single inventory item detail.
     // Used when supplier taps a drug row to open the edit screen.
     // =========================================================
-    public function show(Request $request, int $id): JsonResponse
+     public function show(Request $request, int $id): JsonResponse
     {
         $supplier = $request->user()->supplier;
-
         $item = SupplierInventory::with('drug')
             ->where('supplier_id', $supplier->id)
-            ->where('id', $id)
-            ->first();
+            ->where('id', $id)->first();
 
         if (! $item) {
-            return response()->json([
-                'message' => 'Inventory item not found.',
-            ], 404);
+            return response()->json(['message' => 'Inventory item not found.'], 404);
         }
 
         return response()->json([
@@ -127,10 +119,8 @@ class SupplierInventoryController extends Controller
     public function update(Request $request, int $id): JsonResponse
     {
         $supplier = $request->user()->supplier;
-
         $item = SupplierInventory::where('supplier_id', $supplier->id)
-            ->where('id', $id)
-            ->first();
+            ->where('id', $id)->first();
 
         if (! $item) {
             return response()->json(['message' => 'Inventory item not found.'], 404);
@@ -139,32 +129,25 @@ class SupplierInventoryController extends Controller
         $request->validate([
             'drug_name_raw'      => ['sometimes', 'string', 'min:2', 'max:255'],
             'quantity_available' => ['sometimes', 'integer', 'min:0'],
+            'order_limit'        => ['nullable', 'integer', 'min:1'],
+            'public_price'       => ['sometimes', 'numeric', 'min:0'],
+            'pharmacist_price'   => ['sometimes', 'numeric', 'min:0'],
             'unit_price'         => ['sometimes', 'numeric', 'min:0'],
             'discount_pct'       => ['sometimes', 'numeric', 'min:0', 'max:100'],
         ]);
 
         $updateData = [];
 
-        // Handle drug name change
-        if ($request->filled('drug_name_raw')
-            && $request->drug_name_raw !== $item->drug_name_raw
-        ) {
-            // Get or create the drug for the new name
+        if ($request->filled('drug_name_raw') && $request->drug_name_raw !== $item->drug_name_raw) {
             $drug = $this->getOrCreateDrug($request->drug_name_raw);
-
-            // Check this supplier doesn't already have this drug
             $drugExists = SupplierInventory::where('supplier_id', $supplier->id)
-                ->where('drug_id', $drug->id)
-                ->where('id', '!=', $id)
-                ->exists();
-
+                ->where('drug_id', $drug->id)->where('id', '!=', $id)->exists();
             if ($drugExists) {
                 return response()->json([
                     'message' => 'You already have this drug in your inventory.',
                     'errors'  => ['drug_name_raw' => ['This drug already exists in your inventory.']],
                 ], 422);
             }
-
             $updateData['drug_id']       = $drug->id;
             $updateData['drug_name_raw'] = $request->drug_name_raw;
         }
@@ -172,9 +155,25 @@ class SupplierInventoryController extends Controller
         if ($request->has('quantity_available')) {
             $updateData['quantity_available'] = (int)$request->quantity_available;
         }
-        if ($request->has('unit_price')) {
-            $updateData['unit_price'] = round((float)$request->unit_price, 2);
+
+        // Fix: explicitly handle null order_limit (remove limit)
+        if ($request->exists('order_limit')) {
+            $updateData['order_limit'] = $request->order_limit !== null
+                ? (int)$request->order_limit
+                : null;
         }
+
+        if ($request->has('public_price')) {
+            $updateData['public_price'] = round((float)$request->public_price, 2);
+        }
+
+        // Accept either pharmacist_price or unit_price
+        $newPrice = $request->pharmacist_price ?? $request->unit_price ?? null;
+        if ($newPrice !== null) {
+            $updateData['pharmacist_price'] = round((float)$newPrice, 2);
+            $updateData['unit_price']       = round((float)$newPrice, 2);
+        }
+
         if ($request->has('discount_pct')) {
             $updateData['discount_pct'] = round((float)$request->discount_pct, 2);
         }
@@ -203,10 +202,8 @@ class SupplierInventoryController extends Controller
     public function updateQuantity(Request $request, int $id): JsonResponse
     {
         $supplier = $request->user()->supplier;
-
         $item = SupplierInventory::where('supplier_id', $supplier->id)
-            ->where('id', $id)
-            ->first();
+            ->where('id', $id)->first();
 
         if (! $item) {
             return response()->json(['message' => 'Inventory item not found.'], 404);
@@ -214,9 +211,6 @@ class SupplierInventoryController extends Controller
 
         $request->validate([
             'quantity_available' => ['required', 'integer', 'min:0'],
-        ], [
-            'quantity_available.required' => 'Quantity is required.',
-            'quantity_available.min'      => 'Quantity cannot be negative.',
         ]);
 
         $item->update([
@@ -238,83 +232,82 @@ class SupplierInventoryController extends Controller
     // POST /api/v1/supplier/inventory
     // Manually add a single drug — uses get-or-create
     // =========================================================
-public function store(Request $request): JsonResponse
-{
-    $supplier = $request->user()->supplier;
+  public function store(Request $request): JsonResponse
+    {
+        $supplier = $request->user()->supplier;
+        if (! $supplier) {
+            return response()->json(['message' => 'Supplier account not found.'], 404);
+        }
 
-    if (! $supplier) {
-        return response()->json(['message' => 'Supplier account not found.'], 404);
-    }
+        $request->validate([
+            'drug_id'            => ['required_without:drug_name_raw', 'integer', 'exists:drugs,id'],
+            'drug_name_raw'      => ['required_without:drug_id', 'string', 'min:2', 'max:255'],
+            'quantity_available' => ['required', 'integer', 'min:0'],
+            'order_limit'        => ['nullable', 'integer', 'min:1'],
+            'public_price'       => ['required', 'numeric', 'min:0'],
+            // Accept either pharmacist_price OR unit_price — they mean the same thing
+            'pharmacist_price'   => ['required_without:unit_price', 'numeric', 'min:0'],
+            'unit_price'         => ['required_without:pharmacist_price', 'numeric', 'min:0'],
+            'discount_pct'       => ['nullable', 'numeric', 'min:0', 'max:100'],
+        ], [
+            'drug_id.required_without'          => 'Either a drug selection or drug name is required.',
+            'drug_name_raw.required_without'    => 'Either a drug selection or drug name is required.',
+            'pharmacist_price.required_without' => 'Pharmacist price or unit price is required.',
+            'unit_price.required_without'       => 'Unit price or pharmacist price is required.',
+            'public_price.required'             => 'Public price is required.',
+        ]);
 
-    $request->validate([
-        // Either drug_id OR drug_name_raw must be provided
-        'drug_id'            => ['required_without:drug_name_raw', 'integer', 'exists:drugs,id'],
-        'drug_name_raw'      => ['required_without:drug_id', 'string', 'min:2', 'max:255'],
-        'quantity_available' => ['required', 'integer', 'min:0'],
-        'unit_price'         => ['required', 'numeric', 'min:0'],
-        'discount_pct'       => ['nullable', 'numeric', 'min:0', 'max:100'],
-    ], [
-        'drug_id.required_without'       => 'Either a drug selection or drug name is required.',
-        'drug_name_raw.required_without' => 'Either a drug selection or drug name is required.',
-        'drug_id.exists'                 => 'Selected drug does not exist in the catalog.',
-        'quantity_available.required'    => 'Quantity is required.',
-        'unit_price.required'            => 'Price is required.',
-        'discount_pct.max'               => 'Discount cannot exceed 100%.',
-    ]);
+        if ($request->filled('drug_id')) {
+            $drug = Drug::find($request->drug_id);
+        } else {
+            $drug = $this->getOrCreateDrug($request->drug_name_raw);
+        }
 
-    // Path A — supplier picked from dropdown (drug_id provided)
-    if ($request->filled('drug_id')) {
-        $drug = Drug::find($request->drug_id);
-    } else {
-        // Path B — supplier typed a name manually (get or create)
-        $drug = $this->getOrCreateDrug($request->drug_name_raw);
-    }
+        $exists = SupplierInventory::where('supplier_id', $supplier->id)
+            ->where('drug_id', $drug->id)->exists();
 
-    // Check duplicate
-    $exists = SupplierInventory::where('supplier_id', $supplier->id)
-        ->where('drug_id', $drug->id)
-        ->exists();
+        if ($exists) {
+            return response()->json([
+                'message' => 'This drug already exists in your inventory. Use edit to update it.',
+                'errors'  => ['drug_id' => ['This drug already exists in your inventory.']],
+            ], 422);
+        }
 
-    if ($exists) {
+        // Accept either pharmacist_price or unit_price — same field
+        $pharmacistPrice = round((float)($request->pharmacist_price ?? $request->unit_price), 2);
+        $publicPrice     = round((float)$request->public_price, 2);
+
+        $item = SupplierInventory::create([
+            'supplier_id'        => $supplier->id,
+            'drug_id'            => $drug->id,
+            'drug_name_raw'      => $request->drug_name_raw ?? $drug->trade_name,
+            'quantity_available' => (int)$request->quantity_available,
+            'order_limit'        => $request->filled('order_limit') ? (int)$request->order_limit : null,
+            'unit_price'         => $pharmacistPrice,
+            'public_price'       => $publicPrice,
+            'pharmacist_price'   => $pharmacistPrice,
+            'discount_pct'       => round((float)($request->discount_pct ?? 0), 2),
+            'last_updated'       => now(),
+        ]);
+
         return response()->json([
-            'message' => 'This drug already exists in your inventory. Use the edit option to update it.',
-            'errors'  => [
-                'drug_id' => ['This drug already exists in your inventory.'],
-            ],
-        ], 422);
+            'message' => 'Drug added to inventory successfully.',
+            'data'    => $this->formatItem($item->load('drug')),
+        ], 201);
     }
 
-    $item = SupplierInventory::create([
-        'supplier_id'        => $supplier->id,
-        'drug_id'            => $drug->id,
-        'drug_name_raw'      => $request->drug_name_raw ?? $drug->trade_name,
-        'quantity_available' => (int)$request->quantity_available,
-        'unit_price'         => round((float)$request->unit_price, 2),
-        'discount_pct'       => round((float)($request->discount_pct ?? 0), 2),
-        'last_updated'       => now(),
-    ]);
-
-    return response()->json([
-        'message' => 'Drug added to inventory successfully.',
-        'data'    => $this->formatItem($item->load('drug')),
-    ], 201);
-}
 
     // =========================================================
     // DELETE /api/v1/supplier/inventory/{id}
     // =========================================================
-    public function destroy(Request $request, int $id): JsonResponse
+     public function destroy(Request $request, int $id): JsonResponse
     {
         $supplier = $request->user()->supplier;
-
         $item = SupplierInventory::where('supplier_id', $supplier->id)
-            ->where('id', $id)
-            ->first();
+            ->where('id', $id)->first();
 
         if (! $item) {
-            return response()->json([
-                'message' => 'This drug is not in your inventory.',
-            ], 404);
+            return response()->json(['message' => 'This drug is not in your inventory.'], 404);
         }
 
         $drugName = $item->drug?->trade_name ?? $item->drug_name_raw;
@@ -328,19 +321,24 @@ public function store(Request $request): JsonResponse
     // =========================================================
     // PRIVATE — Format inventory item for response
     // =========================================================
-    private function formatItem(SupplierInventory $item): array
+     private function formatItem(SupplierInventory $item): array
     {
         return [
             'id'                 => $item->id,
             'drug_name'          => $item->drug?->trade_name ?? $item->drug_name_raw,
             'drug_name_raw'      => $item->drug_name_raw,
-            'is_catalog_matched' => $item->is_catalog_matched,
             'quantity_available' => $item->quantity_available,
+            'order_limit'        => $item->order_limit,   // ← add this
             'unit_price'         => $item->unit_price,
+            'public_price'       => $item->public_price,
+            'pharmacist_price'   => $item->pharmacist_price,
             'discount_pct'       => $item->discount_pct,
-            'effective_price'    => round(
-                $item->unit_price * (1 - $item->discount_pct / 100), 2
-            ),
+            'effective_price'    => $item->pharmacist_price,/*round(
+                (float)$item->pharmacist_price * (1 - (float)$item->discount_pct / 100), 2
+            ),*/
+            'savings_per_unit'   => ($item->public_price - $item->pharmacist_price),/*round(
+                (float)$item->public_price - ((float)$item->pharmacist_price * (1 - (float)$item->discount_pct / 100)), 2
+            ),*/
             'last_updated'       => $item->last_updated,
             'drug'               => $item->drug ? [
                 'id'          => $item->drug->id,
@@ -351,6 +349,7 @@ public function store(Request $request): JsonResponse
             ] : null,
         ];
     }
+
 
     // =========================================================
     // PRIVATE — Attempt catalog match (enrichment only)
@@ -399,13 +398,12 @@ public function store(Request $request): JsonResponse
             return response()->json(['message' => 'Supplier account not found.'], 404);
         }
 
-        $alreadyProcessing = \App\Models\InventoryUploadLog::where('supplier_id', $supplier->id)
-            ->where('status', 'processing')
-            ->exists();
+        $alreadyProcessing = InventoryUploadLog::where('supplier_id', $supplier->id)
+            ->where('status', 'processing')->exists();
 
         if ($alreadyProcessing) {
             return response()->json([
-                'message' => 'You already have an upload being processed. Please wait for it to finish.',
+                'message' => 'You already have an upload being processed. Please wait.',
             ], 422);
         }
 
@@ -416,7 +414,7 @@ public function store(Request $request): JsonResponse
             'private'
         );
 
-        $log = \App\Models\InventoryUploadLog::create([
+        $log = InventoryUploadLog::create([
             'supplier_id'  => $supplier->id,
             'uploaded_by'  => $request->user()->id,
             'file_name'    => $originalName,
@@ -426,10 +424,10 @@ public function store(Request $request): JsonResponse
             'status'       => 'processing',
         ]);
 
-        \App\Jobs\ProcessInventoryUpload::dispatch($supplier->id, $log->id, $storagePath);
+        ProcessInventoryUpload::dispatch($supplier->id, $log->id, $storagePath);
 
         return response()->json([
-            'message' => 'File received successfully. Your inventory is being updated in the background.',
+            'message' => 'File received. Processing in background.',
             'data'    => [
                 'upload_id'        => $log->id,
                 'file_name'        => $originalName,
@@ -442,9 +440,8 @@ public function store(Request $request): JsonResponse
     public function uploadStatus(Request $request, int $id): JsonResponse
     {
         $supplier = $request->user()->supplier;
-        $log = \App\Models\InventoryUploadLog::where('id', $id)
-            ->where('supplier_id', $supplier->id)
-            ->first();
+        $log = InventoryUploadLog::where('id', $id)
+            ->where('supplier_id', $supplier->id)->first();
 
         if (! $log) {
             return response()->json(['message' => 'Upload log not found.'], 404);
@@ -466,61 +463,50 @@ public function store(Request $request): JsonResponse
 
         return response()->json(['message' => 'Upload status retrieved.', 'data' => $data], 200);
     }
-
     public function uploadHistory(Request $request): JsonResponse
-    {
-        $supplier = $request->user()->supplier;
-        if (! $supplier) {
-            return response()->json(['message' => 'Supplier account not found.'], 404);
+        {
+            $supplier = $request->user()->supplier;
+            if (! $supplier) {
+                return response()->json(['message' => 'Supplier account not found.'], 404);
+            }
+
+            $logs = InventoryUploadLog::where('supplier_id', $supplier->id)
+                ->orderBy('created_at', 'desc')->limit(10)->get()
+                ->map(fn($log) => [
+                    'id'           => $log->id,
+                    'file_name'    => $log->file_name,
+                    'total_rows'   => $log->total_rows,
+                    'success_rows' => $log->success_rows,
+                    'failed_rows'  => $log->failed_rows,
+                    'status'       => $log->status,
+                    'errors'       => $log->error_log ? json_decode($log->error_log, true) : [],
+                    'uploaded_at'  => $log->created_at,
+                ]);
+
+            return response()->json(['message' => 'Upload history retrieved.', 'data' => $logs], 200);
         }
 
-        $logs = \App\Models\InventoryUploadLog::where('supplier_id', $supplier->id)
-            ->orderBy('created_at', 'desc')
-            ->limit(10)
-            ->get()
-            ->map(fn($log) => [
-                'id'           => $log->id,
-                'file_name'    => $log->file_name,
-                'total_rows'   => $log->total_rows,
-                'success_rows' => $log->success_rows,
-                'failed_rows'  => $log->failed_rows,
-                'status'       => $log->status,
-                'errors'       => $log->error_log ? json_decode($log->error_log, true) : [],
-                'uploaded_at'  => $log->created_at,
-            ]);
-
-        return response()->json(['message' => 'Upload history retrieved.', 'data' => $logs], 200);
-    }
-
-      private function getOrCreateDrug(string $drugName): Drug
+       private function getOrCreateDrug(string $drugName): Drug
     {
         $searchName = strtolower(trim($drugName));
 
-        // Try exact trade name match
         $drug = Drug::where('is_active', 1)
-            ->whereRaw('LOWER(trade_name) = ?', [$searchName])
-            ->first();
+            ->whereRaw('LOWER(trade_name) = ?', [$searchName])->first();
         if ($drug) return $drug;
 
-        // Try exact name match
         $drug = Drug::where('is_active', 1)
-            ->whereRaw('LOWER(name) = ?', [$searchName])
-            ->first();
+            ->whereRaw('LOWER(name) = ?', [$searchName])->first();
         if ($drug) return $drug;
 
-        // Try partial match
         $drug = Drug::where('is_active', 1)
-            ->whereRaw('LOWER(trade_name) LIKE ?', [$searchName . '%'])
-            ->first();
+            ->whereRaw('LOWER(trade_name) LIKE ?', [$searchName . '%'])->first();
         if ($drug) return $drug;
 
-        // Not found — create a new drug in the master catalog
         return Drug::create([
             'name'       => $drugName,
             'trade_name' => $drugName,
             'is_active'  => 1,
         ]);
     }
-
 
 }

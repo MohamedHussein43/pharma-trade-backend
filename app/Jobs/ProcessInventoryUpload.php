@@ -72,7 +72,7 @@ class ProcessInventoryUpload implements ShouldQueue
 
             // Normalise headers
             $headers = array_map(
-                fn($h) => strtolower(trim(str_replace([' ', '-'], '_', (string)$h))),
+                fn($h) => strtolower(str_replace([' ', '-'], '_', trim((string)$h))),
                 $rows[0]
             );
 
@@ -109,10 +109,47 @@ class ProcessInventoryUpload implements ShouldQueue
                     ?? $data['item_name']
                     ?? null;
 
-                $quantity = $data['quantity']   ?? $data['qty']        ?? $data['stock'] ?? '0';
-                $price    = $data['price']      ?? $data['unit_price'] ?? $data['cost']  ?? '0';
-                $discount = $data['discount']   ?? $data['discount_pct'] ?? $data['disc'] ?? '0';
-                $barcode  = $data['barcode']    ?? $data['barcode_number'] ?? null;
+                $orderLimit = $data['order_limit']
+                    ?? $data['limit']
+                    ?? $data['max_order']
+                    ?? $data['order_max']
+                    ?? $data['max']
+                    ?? null;
+                    
+                $publicPrice = $data['public_price']
+                    ?? $data['public']
+                    ?? $data['retail_price']
+                    ?? $data['retail']
+                    ?? '0';
+
+                // pharmacist_price = what pharmacy pays supplier
+                // unit_price is accepted as an alias for pharmacist_price
+                $pharmacistPrice = $data['pharmacist_price']
+                    ?? $data['pharmacist']
+                    ?? $data['unit_price']      // ← accept unit_price as alias
+                    ?? $data['price']
+                    ?? $data['cost']
+                    ?? '0';
+
+                $quantity = $data['quantity']
+                        ?? $data['qty']             
+                        ?? $data['stock']       
+                        ?? '0';
+
+                $discount = $data['discount']           
+                        ?? $data['discount_pct']    
+                        ?? $data['disc']        
+                        ?? '0';
+                        
+                $barcode  = $data['barcode']            
+                        ?? $data['barcode_number']  
+                        ?? null;
+
+                // Validate order_limit is a positive integer if provided
+                $orderLimitVal = null;
+                if (! empty($orderLimit) && is_numeric($orderLimit) && (int)$orderLimit > 0) {
+                    $orderLimitVal = (int)$orderLimit;
+                }
 
                 // ── Basic validation ──────────────────────────────
                 if (empty($drugName)) {
@@ -127,8 +164,14 @@ class ProcessInventoryUpload implements ShouldQueue
                     continue;
                 }
 
-                if (! is_numeric($price) || (float)$price < 0) {
-                    $errors[] = "Row {$rowNum}: Invalid price '{$price}' for '{$drugName}' — row skipped.";
+                if (! is_numeric($pharmacistPrice) || (float)$pharmacistPrice < 0) {
+                    $errors[] = "Row {$rowNum}: Invalid pharmacistPrice '{$pharmacistPrice}' for '{$drugName}' — row skipped.";
+                    $failedRows++;
+                    continue;
+                }
+
+                if (! is_numeric($publicPrice) || (float)$publicPrice < 0) {
+                    $errors[] = "Row {$rowNum}: Invalid publicPrice '{$publicPrice}' for '{$drugName}' — row skipped.";
                     $failedRows++;
                     continue;
                 }
@@ -161,9 +204,12 @@ class ProcessInventoryUpload implements ShouldQueue
                 $batch[] = [
                     'supplier_id'        => $this->supplierId,
                     'drug_id'            => $drugId,
-                    'drug_name_raw'      => $drugName,  // audit reference
+                    'drug_name_raw'      => $drugName,
                     'quantity_available' => (int)$quantity,
-                    'unit_price'         => round((float)$price, 2),
+                    'order_limit'        => $orderLimitVal,
+                    'unit_price'         => round((float)$pharmacistPrice, 2),
+                    'public_price'       => round((float)$publicPrice, 2),
+                    'pharmacist_price'   => round((float)$pharmacistPrice, 2),
                     'discount_pct'       => round($discountVal, 2),
                     'last_updated'       => now(),
                     'created_at'         => now(),
@@ -355,7 +401,8 @@ class ProcessInventoryUpload implements ShouldQueue
         DB::table('supplier_inventory')->upsert(
             $batch,
             ['supplier_id', 'drug_id'],
-            ['drug_name_raw', 'quantity_available', 'unit_price',
+            ['drug_name_raw', 'quantity_available','order_limit',
+             'unit_price', 'public_price', 'pharmacist_price',
              'discount_pct', 'last_updated', 'updated_at']
         );
     }

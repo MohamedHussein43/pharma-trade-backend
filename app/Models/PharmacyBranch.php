@@ -52,14 +52,14 @@ class PharmacyBranch extends Model
 
     // Many-to-many relationship with zones
     public function zones()
-    {
-        return $this->belongsToMany(
-            Zone::class,
-            'pharmacy_branch_zones',
-            'branch_id',
-            'zone_id'
-        );
-    }
+{
+    return $this->belongsToMany(
+        Zone::class,
+        'pharmacy_branch_zones',
+        'branch_id',
+        'zone_id'
+    );
+}
 
     // Convenience: get array of zone IDs
     public function zoneIds(): array

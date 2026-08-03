@@ -144,6 +144,13 @@ class AdminRegistrationController extends Controller
                     case 'supplier':
                         $entityId = $this->createSupplier($regRequest, $request->user());
                         break;
+                    case 'zone_update':
+                        $entityId = $this->applyZoneUpdate($regRequest, $request->user());
+                        break;
+
+                    case 'licence_update':
+                        $entityId = $this->applyLicenceUpdate($regRequest, $request->user());
+                        break;
                 }
 
                 // ── Activate the user account ──
@@ -448,4 +455,75 @@ class AdminRegistrationController extends Controller
             'licence_images' => $images,
         ];
     }
+
+        private function applyZoneUpdate(RegistrationRequest $req, User $admin): int
+    {
+        $meta       = is_string($req->meta) ? json_decode($req->meta, true) : ($req->meta ?? []);
+        $zoneIds    = $meta['zone_ids']    ?? [];
+        $entityType = $meta['entity_type'] ?? null;
+        $entityId   = $meta['entity_id']   ?? null;
+
+        if (empty($zoneIds) || ! $entityId) {
+            throw new \Exception('Zone update request is missing zone_ids or entity_id.');
+        }
+
+        if ($entityType === 'pharmacy') {
+            // Delete all existing zones for this branch
+            \App\Models\PharmacyBranchZone::where('branch_id', $entityId)->delete();
+
+            // Insert new zones
+            foreach ($zoneIds as $zoneId) {
+                \App\Models\PharmacyBranchZone::create([
+                    'branch_id'  => $entityId,
+                    'zone_id'    => (int)$zoneId,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
+        }
+
+        if ($entityType === 'supplier') {
+            // Delete all existing supplier zones
+            \App\Models\SupplierZone::where('supplier_id', $entityId)->delete();
+
+            // Insert new zones
+            foreach ($zoneIds as $zoneId) {
+                \App\Models\SupplierZone::create([
+                    'supplier_id' => $entityId,
+                    'zone_id'     => (int)$zoneId,
+                ]);
+            }
+        }
+
+        return $entityId;
+    }
+
+    // =========================================================
+    // Apply approved licence update
+    // Updates the licence_number on the entity row
+    // =========================================================
+    private function applyLicenceUpdate(RegistrationRequest $req, User $admin): int
+    {
+        $meta       = is_string($req->meta) ? json_decode($req->meta, true) : ($req->meta ?? []);
+        $entityType = $meta['entity_type'] ?? null;
+        $entityId   = $meta['entity_id']   ?? null;
+        $newLicence = $meta['new_licence']  ?? $req->licence_number;
+
+        if (! $entityId || ! $newLicence) {
+            throw new \Exception('Licence update request is missing entity_id or new licence number.');
+        }
+
+        if ($entityType === 'pharmacy') {
+            \App\Models\PharmacyBranch::where('id', $entityId)
+                ->update(['licence_number' => $newLicence]);
+        }
+
+        if ($entityType === 'supplier') {
+            \App\Models\Supplier::where('id', $entityId)
+                ->update(['licence_number' => $newLicence]);
+        }
+
+        return $entityId;
+    }
+
 }

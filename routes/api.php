@@ -2,11 +2,18 @@
 
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\API\AuthController;
+use App\Http\Controllers\API\UserProfileController;
 use App\Http\Controllers\API\Admin\AdminRegistrationController;
 use App\Http\Controllers\API\Admin\ZoneController;
 use App\Http\Controllers\API\Admin\LicenceImageController;
 use App\Http\Controllers\API\Admin\DrugController;
+use App\Http\Controllers\API\Admin\BannedDrugController;
 use App\Http\Controllers\API\Supplier\SupplierInventoryController;
+
+use App\Http\Controllers\Api\Pharmacy\PharmacyController;
+use App\Http\Controllers\Api\Pharmacy\OrderController;
+use App\Http\Controllers\Api\Pharmacy\AllocateOrderController;
+use App\Http\Controllers\Api\Supplier\SupplierOrderController;
 
 Route::prefix('v1')->group(function () {
 
@@ -33,6 +40,26 @@ Route::prefix('v1')->middleware('auth:sanctum')->group(function () {
         // ── Auth ─────────────────────────────────────────────
         Route::post('/logout',     [AuthController::class, 'logout']);
         Route::post('/logout/all', [AuthController::class, 'logoutAll']);
+         // ── Profile — all authenticated roles ────────────────────
+        Route::get('/profile',                  [UserProfileController::class, 'show']);
+        Route::put('/profile',                  [UserProfileController::class, 'update']);
+        Route::patch('/profile/email',          [UserProfileController::class, 'updateEmail']);  
+        Route::patch('/profile/password',       [UserProfileController::class, 'changePassword']);
+        Route::patch('/profile/device-token',   [UserProfileController::class, 'updateDeviceToken']);
+        Route::delete('/profile',               [UserProfileController::class, 'deactivate']);
+
+        // ── Update requests (zone + licence) ─────────────────────
+        Route::post('/profile/request-zone-update',     [UserProfileController::class, 'requestZoneUpdate']);    // ← NEW
+        Route::post('/profile/request-licence-update',  [UserProfileController::class, 'requestLicenceUpdate']); // ← NEW
+        Route::get('/profile/update-requests',          [UserProfileController::class, 'updateRequests']);        // ← NEW
+
+        // ── Branch profile — pharmacy only ───────────────────────
+        Route::patch('/profile/branch', [UserProfileController::class, 'updateBranch'])
+            ->middleware('role:pharmacy');
+
+        // ── Supplier profile — supplier only ─────────────────────
+        Route::patch('/profile/supplier', [UserProfileController::class, 'updateSupplier'])
+            ->middleware('role:supplier');
  
         // ── Admin only ────────────────────────────────────────
        Route::middleware('role:admin')->group(function () {
@@ -91,29 +118,72 @@ Route::prefix('v1')->middleware('auth:sanctum')->group(function () {
     Route::middleware('role:supplier')->prefix('supplier')->group(function () {
 
 
-     // ── Inventory CRUD ────────────────────────────────────────
-    Route::get('/inventory',                         [SupplierInventoryController::class, 'index']);
-    Route::post('/inventory',                        [SupplierInventoryController::class, 'store']);         // manual add
-    Route::get('/inventory/{id}',                    [SupplierInventoryController::class, 'show']);          // single item
-    Route::put('/inventory/{id}',                    [SupplierInventoryController::class, 'update']);        // full edit
-    Route::patch('/inventory/{id}/quantity',         [SupplierInventoryController::class, 'updateQuantity']); // quick qty update
-    Route::delete('/inventory/{id}',                 [SupplierInventoryController::class, 'destroy']);
+        // ── Inventory CRUD ────────────────────────────────────────
+        Route::get('/inventory',                         [SupplierInventoryController::class, 'index']);
+        Route::post('/inventory',                        [SupplierInventoryController::class, 'store']);         // manual add
+        Route::get('/inventory/{id}',                    [SupplierInventoryController::class, 'show']);          // single item
+        Route::put('/inventory/{id}',                    [SupplierInventoryController::class, 'update']);        // full edit
+        Route::patch('/inventory/{id}/quantity',         [SupplierInventoryController::class, 'updateQuantity']); // quick qty update
+        Route::delete('/inventory/{id}',                 [SupplierInventoryController::class, 'destroy']);
 
-    // ── Excel upload ──────────────────────────────────────────
-    Route::post('/inventory/upload',                 [SupplierInventoryController::class, 'upload']);
-    Route::get('/inventory/upload-status/{id}',      [SupplierInventoryController::class, 'uploadStatus']);
-    Route::get('/inventory/upload-history',          [SupplierInventoryController::class, 'uploadHistory']);
+        // ── Excel upload ──────────────────────────────────────────
+        Route::post('/inventory/upload',                 [SupplierInventoryController::class, 'upload']);
+        Route::get('/inventory/upload-status/{id}',      [SupplierInventoryController::class, 'uploadStatus']);
+        Route::get('/inventory/upload-history',          [SupplierInventoryController::class, 'uploadHistory']);
 
-        // Inventory management
+
+        // Orders
+        Route::get('/orders',                          [SupplierOrderController::class, 'index']);
+        Route::get('/orders/{id}',                     [SupplierOrderController::class, 'show']);
+        Route::post('/orders/{id}/confirm',            [SupplierOrderController::class, 'confirm']);
+        Route::post('/orders/{id}/report-shortage',    [SupplierOrderController::class, 'reportShortage']);
+        Route::post('/orders/{id}/ship',               [SupplierOrderController::class, 'ship']);
+        Route::patch('/orders/{id}/deliver',           [SupplierOrderController::class, 'deliver']);
+
+            // Inventory management
         //to ad drug into the drugs table
         Route::post('/drugs',                   [DrugController::class, 'store']);
     });
+
+
+    // ────────────────────────────────────────────────────────────
+    // PHARMACY ROUTES
+    // ────────────────────────────────────────────────────────────
+    Route::middleware('role:pharmacy')->prefix('pharmacy')->group(function () {
+
+        // Branch profile
+        Route::get('/branch',                          [PharmacyController::class, 'branch']);
+
+        // Suppliers in zone
+        Route::get('/suppliers',                       [PharmacyController::class, 'suppliers']);
+        Route::get('/suppliers/drugs',                 [PharmacyController::class, 'availableDrugs']);
+        Route::get('/suppliers/{id}/inventory',        [PharmacyController::class, 'supplierInventory']);
+
+        // Orders
+        Route::get('/orders',                          [OrderController::class, 'index']);
+        Route::post('/orders',                         [OrderController::class, 'store']);
+        Route::get('/orders/{id}',                     [OrderController::class, 'show']);
+        Route::patch('/orders/{id}/cancel',            [OrderController::class, 'cancel']);
+
+        // Order items
+        Route::post('/orders/{id}/items',              [OrderController::class, 'addItem']);
+        Route::delete('/orders/{id}/items/{item_id}',  [OrderController::class, 'removeItem']);
+        Route::post('/orders/{id}/upload',             [OrderController::class, 'uploadItems']);
+
+        // Allocation
+        Route::post('/orders/{id}/allocate',           [AllocateOrderController::class, 'allocate']);
+        Route::post('/orders/{id}/confirm',            [AllocateOrderController::class, 'confirm']);
+        Route::post('/orders/{id}/resolve-shortage',   [AllocateOrderController::class, 'resolveShortage']);
+        Route::post('/orders/{id}/confirm-delivery',   [PharmacyController::class, 'confirmDelivery']);
+
+    });
+
  
         // ── Pharmacy only ─────────────────────────────────────
-        Route::middleware('role:pharmacy')->group(function () {
+       /* Route::middleware('role:pharmacy')->group(function () {
             Route::post('/branches/request',
                 [App\Http\Controllers\Api\Pharmacy\BranchController::class, 'request']);
-        });
+        });*/
  
     });
 });

@@ -37,8 +37,8 @@ class RegisterSupplierRequest extends FormRequest
             'min_order_value'    => ['nullable', 'numeric', 'min:0'],
             'min_order_qty'      => ['nullable', 'integer', 'min:0'],
             // ── Zone coverage ─────────────────────────────────
-            //'zones'              => ['required', 'array', 'min:1'],
-            //'zones.*'            => ['integer', 'exists:zones,id'],
+            'zones'              => ['required', 'array', 'min:1'],
+            'zones.*'            => ['integer', 'exists:zones,id'],
             // ── Licence images ────────────────────────────────
             'licence_image'      => ['required', 'file', 'mimes:jpg,jpeg,png,heic,pdf', 'max:5120'],
             'licence_image_back' => ['nullable', 'file', 'mimes:jpg,jpeg,png,heic,pdf', 'max:5120'],
