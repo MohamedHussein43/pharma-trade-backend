@@ -168,7 +168,7 @@ class AdminRegistrationController extends Controller
                 ]);
 
                 // ── Notify the applicant ──
-                Notification::create([
+                /*Notification::create([
                     'user_id'         => $regRequest->user_id,
                     'title'           => 'Your account has been approved!',
                     'body'            => "Welcome to the platform! Your {$regRequest->entity_type} account for '{$regRequest->business_name}' has been approved. You can now log in.",
@@ -177,7 +177,9 @@ class AdminRegistrationController extends Controller
                     'notifiable_type' => 'RegistrationRequest',
                     'notifiable_id'   => $regRequest->id,
                     'is_read'         => 0,
-                ]);
+                ]);*/
+                $notificationService = app(\App\Services\NotificationService::class);
+                $notificationService->registrationApproved($user->id, $req->entity_type);
 
                 return $entityId;
             });
@@ -245,7 +247,9 @@ class AdminRegistrationController extends Controller
             ]);
 
             // ── Notify the applicant with reason ──
-            Notification::create([
+            $notificationService = app(\App\Services\NotificationService::class);
+            $notificationService->registrationDeclined($user->id, $request->decline_reason);
+            /*Notification::create([
                 'user_id'         => $regRequest->user_id,
                 'title'           => 'Registration request declined',
                 'body'            => "Your registration for '{$regRequest->business_name}' was declined. Reason: {$request->decline_reason}",
@@ -254,7 +258,7 @@ class AdminRegistrationController extends Controller
                 'notifiable_type' => 'RegistrationRequest',
                 'notifiable_id'   => $regRequest->id,
                 'is_read'         => 0,
-            ]);
+            ]);*/
         });
 
         return response()->json([

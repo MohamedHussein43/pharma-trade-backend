@@ -8,11 +8,13 @@ use App\Models\OrderItem;
 use App\Models\Supplier;
 use App\Models\SupplierInventory;
 use App\Models\SupplierOrder;
+use App\Services\NotificationService;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
 class AllocationEngine
 {
+    public function __construct(private NotificationService $notifier) {}
     // =========================================================
     // allocate()
     // =========================================================
@@ -92,9 +94,23 @@ class AllocationEngine
                         'status'             => 'pending',
                     ]);
                 }
+                \App\Models\Commission::create([
+                    'supplier_order_id'  => $supplierOrder->id,
+                    'master_order_id'    => $order->id,
+                    'supplier_id'        => $supplierId,
+                    'pharmacy_branch_id' => $order->pharmacy_branch_id,
+                    'order_number'       => $supplierOrder->order_number,
+                    'subtotal'           => $subtotal,
+                    'commission_pct'     => $commPct,
+                    'commission_value'   => $commValue,
+                    'status'             => 'pending',
+                    'period_month'       => now()->month,
+                    'period_year'        => now()->year,
+                ]);
 
                 $totalValue += $subtotal;
-                $this->notifySupplier($supplierId, $supplierOrder);
+                //$this->notifySupplier($supplierId, $supplierOrder);
+                $this->notifier->newOrderForSupplier($supplierOrder);
             }
 
             $order->update([

@@ -35,4 +35,14 @@ return [
         ],
     ],
 
+    'fcm' => [
+        'project_id'             => env('FCM_PROJECT_ID', ''),
+        'credentials_path'       => env('FCM_CREDENTIALS_PATH', storage_path('app/firebase/service-account.json')),
+    ],
+
+    'whatsapp' => [
+        'token'          => env('WHATSAPP_TOKEN', ''),
+        'from_number_id' => env('WHATSAPP_FROM_NUMBER_ID', ''),
+    ],
+
 ];

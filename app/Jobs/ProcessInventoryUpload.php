@@ -332,11 +332,12 @@ class ProcessInventoryUpload implements ShouldQueue
     // finds it in memory instead of creating a duplicate.
     // =========================================================
     private function getOrCreateDrug(
-        string  $drugName,
-        ?string $barcode,
-        array   &$catalog,   // passed by reference — updated in place
-        int     &$newDrugsAdded
-    ): int {
+            string  $drugName,
+            ?string $barcode,
+            array   &$catalog,   // passed by reference — updated in place
+            int     &$newDrugsAdded
+        ): int 
+    {
         $searchName = strtolower(trim($drugName));
 
         // Strategy 1 — Barcode exact match
@@ -412,8 +413,9 @@ class ProcessInventoryUpload implements ShouldQueue
     // =========================================================
     private function isBannedDrugCheckEnabled(): bool
     {
-        $setting = \App\Models\PlatformSetting::first();
-        return $setting ? (bool)$setting->enable_banned_drug_check : false;
+        return \App\Models\PlatformSetting::isBannedDrugCheckEnabled();
+        /*$setting = \App\Models\PlatformSetting::first();
+        return $setting ? (bool)$setting->enable_banned_drug_check : false;*/
     }
 
     private function isBannedDrug(string $drugName): bool
@@ -435,7 +437,15 @@ class ProcessInventoryUpload implements ShouldQueue
         if ($newDrugs > 0) $parts[] = "{$newDrugs} new drug(s) were added to the platform catalog.";
         if ($failed > 0)   $parts[] = "{$failed} rows had errors — check upload history.";
 
-        Notification::create([
+        $notificationService = app(\App\Services\NotificationService::class);
+        $notificationService->inventoryUploadComplete(
+            $supplier->user->id,
+            $this->logId,
+            $success,
+            $failed
+        );
+        
+        /*Notification::create([
             'user_id'         => $supplier->user->id,
             'title'           => 'Inventory upload complete',
             'body'            => implode(' ', $parts),
@@ -444,7 +454,7 @@ class ProcessInventoryUpload implements ShouldQueue
             'notifiable_type' => 'InventoryUploadLog',
             'notifiable_id'   => $this->logId,
             'is_read'         => 0,
-        ]);
+        ]);*/
     }
 
     private function notifySupplierFailed(): void
@@ -452,7 +462,7 @@ class ProcessInventoryUpload implements ShouldQueue
         $supplier = Supplier::with('user')->find($this->supplierId);
         if (! $supplier?->user) return;
 
-        Notification::create([
+        /*Notification::create([
             'user_id'         => $supplier->user->id,
             'title'           => 'Inventory upload failed',
             'body'            => 'Your inventory file could not be processed. Please check the file format and try again.',
@@ -461,6 +471,15 @@ class ProcessInventoryUpload implements ShouldQueue
             'notifiable_type' => 'InventoryUploadLog',
             'notifiable_id'   => $this->logId,
             'is_read'         => 0,
-        ]);
+        ]);*/
+        $notificationService = app(\App\Services\NotificationService::class);
+        $notificationService->send(
+            userId:         $supplier->user->id,
+            title:          'Inventory upload failed',
+            body:           'Your inventory file could not be processed. Please check the file format and try again.',
+            type:           'general',
+            notifiableType: 'InventoryUploadLog',
+            notifiableId:   $this->logId,
+        );
     }
 }

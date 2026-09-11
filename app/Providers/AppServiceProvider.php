@@ -7,6 +7,9 @@ use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Http\Request;
 use App\Http\Requests\LoginRequest;
+use App\Services\FcmService;
+use App\Services\WhatsAppService;
+use App\Services\NotificationService;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -15,7 +18,9 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        $this->app->singleton(FcmService::class);
+        $this->app->singleton(WhatsAppService::class);
+        $this->app->singleton(NotificationService::class);
     }
 
     /**

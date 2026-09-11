@@ -11,6 +11,11 @@ use App\Models\SupplierOrder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use App\Services\FcmService;
+use App\Services\WhatsAppService;
+use App\Services\NotificationService;
+
+
 
 class SupplierOrderController extends Controller
 {
@@ -18,6 +23,9 @@ class SupplierOrderController extends Controller
     // GET /api/v1/supplier/orders
     // Supplier sees all orders assigned to them.
     // =========================================================
+
+    public function __construct(private NotificationService $notifier) {}
+
     public function index(Request $request): JsonResponse
     {
         $supplier = $request->user()->supplier;
@@ -222,10 +230,12 @@ class SupplierOrderController extends Controller
             $this->updateMasterOrderStatus($order->master_order_id, $hasShortage);
 
             // Notify pharmacy
-            $this->notifyPharmacy($order, $hasShortage);
+            //$this->notifyPharmacy($order, $hasShortage);
+            //$this->notifier->orderConfirmedForPharmacy($order, $hasShortage);
         });
 
         $order->refresh();
+        $this->notifier->orderConfirmedForPharmacy($order, $order->status === 'partially_available');
 
         return response()->json([
             'message' => 'Order confirmed successfully.',
@@ -296,6 +306,7 @@ class SupplierOrderController extends Controller
             $this->notifyPharmacyShortage($order);
         });
 
+        $this->notifier->orderConfirmedForPharmacy($order->fresh(), true);
         return response()->json([
             'message' => 'Shortage reported successfully. The pharmacy has been notified.',
             'data'    => ['order_status' => 'partially_available'],
@@ -328,7 +339,7 @@ class SupplierOrderController extends Controller
 
         // Update master order if all supplier orders are shipped
         $allShipped = SupplierOrder::where('master_order_id', $order->master_order_id)
-            ->whereNotIn('status', ['shipped', 'delivered', 'cancelled'])
+            ->whereNotIn('status', ['shipped', 'delivered', 'delivery_confirmed', 'cancelled'])
             ->doesntExist();
 
         if ($allShipped) {
@@ -341,7 +352,7 @@ class SupplierOrderController extends Controller
             ->find($order->master_order_id);
 
         if ($masterOrder?->pharmacyBranch?->user) {
-            Notification::create([
+            /*Notification::create([
                 'user_id'         => $masterOrder->pharmacyBranch->user->id,
                 'title'           => 'Order shipped',
                 'body'            => "Order {$order->order_number} has been shipped.",
@@ -350,7 +361,8 @@ class SupplierOrderController extends Controller
                 'notifiable_type' => 'SupplierOrder',
                 'notifiable_id'   => $order->id,
                 'is_read'         => 0,
-            ]);
+            ]);*/
+            $this->notifier->orderShippedForPharmacy($order);
         }
 
         return response()->json([
@@ -387,12 +399,18 @@ class SupplierOrderController extends Controller
             'delivered_at' => now(),
         ]);
 
-        // Check if all supplier orders delivered
-        $allDelivered = SupplierOrder::where('master_order_id', $order->master_order_id)
-            ->whereNotIn('status', ['delivered', 'cancelled'])
+        // Check if pharmacy already confirmed → close fully
+        $masterOrder              = MasterOrder::find($order->master_order_id);
+        $pharmacyAlreadyConfirmed = ! is_null($masterOrder?->pharmacy_confirmed_at);
+
+        $allSuppliersDone = SupplierOrder::where('master_order_id', $order->master_order_id)
+            ->whereNotIn('status', ['delivered', 'delivery_confirmed', 'cancelled'])
             ->doesntExist();
 
-        if ($allDelivered) {
+        if ($pharmacyAlreadyConfirmed && $allSuppliersDone) {
+            MasterOrder::where('id', $order->master_order_id)
+                ->update(['status' => 'delivery_confirmed']);
+        } elseif ($allSuppliersDone) {
             MasterOrder::where('id', $order->master_order_id)
                 ->update(['status' => 'delivered']);
         }
@@ -402,7 +420,7 @@ class SupplierOrderController extends Controller
             ->find($order->master_order_id);
 
         if ($masterOrder?->pharmacyBranch?->user) {
-            Notification::create([
+            /*Notification::create([
                 'user_id'         => $masterOrder->pharmacyBranch->user->id,
                 'title'           => 'Order delivered',
                 'body'            => "Order {$order->order_number} has been delivered.",
@@ -411,12 +429,13 @@ class SupplierOrderController extends Controller
                 'notifiable_type' => 'SupplierOrder',
                 'notifiable_id'   => $order->id,
                 'is_read'         => 0,
-            ]);
+            ]);*/
+            $this->notifier->orderDeliveredForPharmacy($order);
         }
 
         return response()->json([
             'message' => 'Order marked as delivered.',
-            'data'    => ['id' => $order->id, 'status' => 'delivered'],
+            'data'    => ['id' => $order->id, 'status' => 'delivered', 'delivered_at' => $order->delivered_at],
         ], 200);
     }
 

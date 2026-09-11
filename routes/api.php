@@ -14,6 +14,11 @@ use App\Http\Controllers\Api\Pharmacy\PharmacyController;
 use App\Http\Controllers\Api\Pharmacy\OrderController;
 use App\Http\Controllers\Api\Pharmacy\AllocateOrderController;
 use App\Http\Controllers\Api\Supplier\SupplierOrderController;
+use App\Http\Controllers\Api\Admin\CommissionController;
+use App\Http\Controllers\Api\Admin\AdminSettingsController;
+use App\Http\Controllers\Api\Pharmacy\OrderTrackingController;
+
+use App\Http\Controllers\Api\Admin\NotificationController;
 
 Route::prefix('v1')->group(function () {
 
@@ -36,6 +41,17 @@ Route::prefix('v1')->middleware('auth:sanctum')->group(function () {
  
     // All other routes require is_active = 1
     Route::middleware('active.user')->group(function () {
+
+
+        // ── Notifications — all roles ─────────────────────────────
+        // IMPORTANT: read-all and unread-count must come BEFORE
+        // /{id} routes otherwise Laravel matches "read-all" as an id
+        Route::get('/notifications',                    [NotificationController::class, 'index']);
+        Route::get('/notifications/unread-count',       [NotificationController::class, 'unreadCount']);
+        Route::patch('/notifications/read-all',         [NotificationController::class, 'markAllRead']);
+        Route::patch('/notifications/{id}/read',        [NotificationController::class, 'markRead']);
+        Route::delete('/notifications',                 [NotificationController::class, 'destroyAll']);
+        Route::delete('/notifications/{id}',            [NotificationController::class, 'destroy']);
  
         // ── Auth ─────────────────────────────────────────────
         Route::post('/logout',     [AuthController::class, 'logout']);
@@ -43,7 +59,7 @@ Route::prefix('v1')->middleware('auth:sanctum')->group(function () {
          // ── Profile — all authenticated roles ────────────────────
         Route::get('/profile',                  [UserProfileController::class, 'show']);
         Route::put('/profile',                  [UserProfileController::class, 'update']);
-        Route::patch('/profile/email',          [UserProfileController::class, 'updateEmail']);  
+        //Route::patch('/profile/email',          [UserProfileController::class, 'updateEmail']);  
         Route::patch('/profile/password',       [UserProfileController::class, 'changePassword']);
         Route::patch('/profile/device-token',   [UserProfileController::class, 'updateDeviceToken']);
         Route::delete('/profile',               [UserProfileController::class, 'deactivate']);
@@ -66,7 +82,7 @@ Route::prefix('v1')->middleware('auth:sanctum')->group(function () {
 
         // Registration request review
         Route::prefix('admin')->group(function () {
-
+            Route::get('/fcm-debug', [\App\Http\Controllers\Api\Admin\FcmDebugController::class, 'debug']);
             // Registration requests
             Route::get('/registration-requests/stats',
                 [AdminRegistrationController::class, 'stats']);
@@ -108,6 +124,15 @@ Route::prefix('v1')->middleware('auth:sanctum')->group(function () {
             Route::delete('/banned-drugs/{id}',      [BannedDrugController::class, 'destroy']);
 
             Route::get('/rejected-inventory-rows',   [BannedDrugController::class, 'rejectedRows']);
+            Route::get('/settings',  [AdminSettingsController::class, 'getSettings']);
+            Route::patch('/settings', [AdminSettingsController::class, 'updateSettings']);
+
+            Route::get('/commissions',                      [CommissionController::class, 'index']);
+            Route::get('/commissions/by-supplier',          [CommissionController::class, 'bySupplier']);
+            Route::get('/commissions/by-period',            [CommissionController::class, 'byPeriod']);
+            Route::get('/commissions/order/{order_id}',     [CommissionController::class, 'byOrder']);
+            Route::patch('/commissions/{id}/mark-paid',     [CommissionController::class, 'markPaid']);
+            Route::patch('/commissions/bulk-mark-paid',     [CommissionController::class, 'bulkMarkPaid']);
         });
     });
     
@@ -139,6 +164,7 @@ Route::prefix('v1')->middleware('auth:sanctum')->group(function () {
         Route::post('/orders/{id}/report-shortage',    [SupplierOrderController::class, 'reportShortage']);
         Route::post('/orders/{id}/ship',               [SupplierOrderController::class, 'ship']);
         Route::patch('/orders/{id}/deliver',           [SupplierOrderController::class, 'deliver']);
+        Route::get('/orders/{id}/track', [OrderTrackingController::class, 'trackSupplierOrder']);
 
             // Inventory management
         //to ad drug into the drugs table
@@ -175,6 +201,7 @@ Route::prefix('v1')->middleware('auth:sanctum')->group(function () {
         Route::post('/orders/{id}/confirm',            [AllocateOrderController::class, 'confirm']);
         Route::post('/orders/{id}/resolve-shortage',   [AllocateOrderController::class, 'resolveShortage']);
         Route::post('/orders/{id}/confirm-delivery',   [PharmacyController::class, 'confirmDelivery']);
+        Route::get('/orders/{id}/track', [OrderTrackingController::class, 'track']);
 
     });
 

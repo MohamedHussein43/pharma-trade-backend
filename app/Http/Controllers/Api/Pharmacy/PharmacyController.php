@@ -11,12 +11,15 @@ use App\Models\SupplierOrder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use App\Services\NotificationService;
 
 class PharmacyController extends Controller
 {
     // =========================================================
     // GET /api/v1/pharmacy/branch
     // =========================================================
+    public function __construct(private NotificationService $notifier) {}
+    
     public function branch(Request $request): JsonResponse
     {
         $user   = $request->user();
@@ -395,7 +398,7 @@ class PharmacyController extends Controller
 
             // Notify pharmacy (the confirming user)
             // Sprint 4 will send actual FCM push using user.device_token
-            Notification::create([
+            /*Notification::create([
                 'user_id'         => $user->id,
                 'title'           => 'Delivery confirmed',
                 'body'            => "You confirmed receipt of order {$order->order_number}. The order is now closed.",
@@ -404,10 +407,11 @@ class PharmacyController extends Controller
                 'notifiable_type' => 'MasterOrder',
                 'notifiable_id'   => $order->id,
                 'is_read'         => 0,
-            ]);
+            ]);*/
+            $this->notifier->deliveryConfirmedForAll($order, $user);
 
             // Notify each supplier — their order is fully closed
-            foreach ($order->supplierOrders as $supplierOrder) {
+            /*foreach ($order->supplierOrders as $supplierOrder) {
                 if (! $supplierOrder->supplier?->user) continue;
 
                 Notification::create([
@@ -420,7 +424,7 @@ class PharmacyController extends Controller
                     'notifiable_id'   => $supplierOrder->id,
                     'is_read'         => 0,
                 ]);
-            }
+            }*/
         });
 
         return response()->json([

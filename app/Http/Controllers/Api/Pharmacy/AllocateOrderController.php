@@ -11,10 +11,15 @@ use App\Services\AllocationEngine;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use App\Services\NotificationService;
 
 class AllocateOrderController extends Controller
 {
-    public function __construct(private AllocationEngine $engine) {}
+    public function __construct(
+        private AllocationEngine $engine,
+        private NotificationService  $notifier
+        
+        ) {}
 
     // =========================================================
     // POST /api/v1/pharmacy/orders/{id}/allocate
