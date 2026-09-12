@@ -1,14 +1,14 @@
 <?php
 
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\API\AuthController;
-use App\Http\Controllers\API\UserProfileController;
-use App\Http\Controllers\API\Admin\AdminRegistrationController;
-use App\Http\Controllers\API\Admin\ZoneController;
-use App\Http\Controllers\API\Admin\LicenceImageController;
-use App\Http\Controllers\API\Admin\DrugController;
-use App\Http\Controllers\API\Admin\BannedDrugController;
-use App\Http\Controllers\API\Supplier\SupplierInventoryController;
+use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\UserProfileController;
+use App\Http\Controllers\Api\Admin\AdminRegistrationController;
+use App\Http\Controllers\Api\Admin\ZoneController;
+use App\Http\Controllers\Api\Admin\LicenceImageController;
+use App\Http\Controllers\Api\Admin\DrugController;
+use App\Http\Controllers\Api\Admin\BannedDrugController;
+use App\Http\Controllers\Api\Supplier\SupplierInventoryController;
 
 use App\Http\Controllers\Api\Pharmacy\PharmacyController;
 use App\Http\Controllers\Api\Pharmacy\OrderController;
