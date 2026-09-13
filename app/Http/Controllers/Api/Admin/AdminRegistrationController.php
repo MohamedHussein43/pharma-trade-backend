@@ -179,7 +179,7 @@ class AdminRegistrationController extends Controller
                     'is_read'         => 0,
                 ]);*/
                 $notificationService = app(\App\Services\NotificationService::class);
-                $notificationService->registrationApproved($user->id, $req->entity_type);
+                $notificationService->registrationApproved($request->user()->id, (string)($req->entity_type ?? 'user'));
 
                 return $entityId;
             });
@@ -248,7 +248,7 @@ class AdminRegistrationController extends Controller
 
             // ── Notify the applicant with reason ──
             $notificationService = app(\App\Services\NotificationService::class);
-            $notificationService->registrationDeclined($user->id, $request->decline_reason);
+            $notificationService->registrationDeclined($request->user()->id, $request->decline_reason);
             /*Notification::create([
                 'user_id'         => $regRequest->user_id,
                 'title'           => 'Registration request declined',

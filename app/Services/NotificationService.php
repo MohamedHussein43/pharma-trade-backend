@@ -189,7 +189,7 @@ class NotificationService
         }
     }
 
-    public function registrationApproved(int $userId, string $entityType): void
+    public function registrationApproved(int $userId, ?string $entityType = null): void
     {
         $this->send(
             userId:         $userId,
