@@ -20,62 +20,78 @@ use App\Models\Notification;
 
 class AuthController extends Controller
 {
-     public function login(LoginRequest $request)
+      public function login(Request $request): JsonResponse
     {
-        $user = User::where('phone', $request->phone)->first();
+        
+        $request->validate([
+            'phone'        => ['required', 'string'],
+            'password'     => ['required', 'string'],
+            'device_token' => ['nullable', 'string', 'max:255'],
+        ], [
+            'phone.required'    => 'Phone number is required.',
+            'password.required' => 'Password is required.',
+        ]);
 
-        if (!$user || !Hash::check($request->password, $user->password)) {
+        // Find user by phone
+        $user = \App\Models\User::where('phone', $request->phone)->first();
 
+        if (! $user || ! \Illuminate\Support\Facades\Hash::check($request->password, $user->password)) {
             return response()->json([
-                'success' => false,
-                'message' => 'Invalid phone or password'
+                'message' => 'Invalid credentials.',
+                'errors'  => [
+                    'phone' => ['The phone number or password is incorrect.'],
+                ],
             ], 401);
         }
 
+        // Check if account is active
+        // (pending/suspended users get a specific message)
+        if (! $user->is_active || $user->status === 'suspended') {
+            return response()->json([
+                'message' => 'Your account is not active. Please contact support.',
+                'data'    => [
+                    'status' => $user->status,
+                ],
+            ], 403);
+        }
+
         if ($user->status === 'pending_approval') {
-
             return response()->json([
-                'success' => false,
-                'message' => 'Account pending approval'
+                'message' => 'Your account is pending admin approval.',
+                'data'    => [
+                    'status' => 'pending_approval',
+                ],
             ], 403);
         }
 
-        if ($user->status === 'suspended') //blocked from admin due to any reason
-        {
-
-            return response()->json([
-                'success' => false,
-                'message' => 'Account suspended'
-            ], 403);
+        // Store device token if provided
+        $updateData = ['last_login_at' => now()];
+        if ($request->filled('device_token')) {
+            $updateData['device_token'] = $request->device_token;
         }
+        $user->update($updateData);
 
-        if (!$user->is_active) {
-
-            return response()->json([
-                'success' => false,
-                'message' => 'Account inactive'
-            ], 403);
-        }
-
-        $user->device_token = $request->device_token;
-        $user->last_login_at = now();
-        $user->save();
-
-        $token = $user->createToken('mobile-app')->plainTextToken;
+        // Revoke old tokens and create fresh one
+        $user->tokens()->delete();
+        $token = $user->createToken('auth_token')->plainTextToken;
 
         return response()->json([
-            'success' => true,
-            'message' => 'Login successful',
-            'token' => $token,
-            'user' => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'phone' => $user->phone,
-                'email' => $user->email,
-                'role' => $user->role
-            ]
-        ]);
+            'message' => 'Login successful.',
+            'data'    => [
+                'token'      => $token,
+                'token_type' => 'Bearer',
+                'user'       => [
+                    'id'     => $user->id,
+                    'name'   => $user->name,
+                    'email'  => $user->email,
+                    'phone'  => $user->phone,
+                    'role'   => $user->role,
+                    'status' => $user->status,
+                ],
+            ],
+        ], 200);
     }
+
 
      public function logout(Request $request): JsonResponse
     {

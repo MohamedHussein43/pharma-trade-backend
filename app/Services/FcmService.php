@@ -45,8 +45,17 @@ class FcmService
         }
 
         if (empty($user->device_token)) {
-            Log::info("FCM: User {$notification->user_id} has no device token — skipping.");
-            $notification->update(['fcm_error' => 'No device token']);
+            Log::warning("FCM: User {$notification->user_id} has no device token.");
+            $notification->update(['fcm_error' => 'No device token stored for this user']);
+            return false;
+        }
+        if (! $user) {
+            $notification->update(['fcm_error' => 'User not found in DB']);
+            return false;
+        }
+
+        if (empty($this->credentialsPath) && empty(config('services.fcm.credentials_base64'))) {
+            $notification->update(['fcm_error' => 'FCM credentials not configured']);
             return false;
         }
 
