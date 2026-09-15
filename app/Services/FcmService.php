@@ -17,6 +17,12 @@ class FcmService
     public function __construct()
     {
         $this->credentialsPath = config('services.fcm.credentials_path', '');
+        if (!file_exists($this->credentialsPath) && env('FIREBASE_CREDENTIALS_BASE64')) {
+            $this->credentialsPath = json_decode(
+                base64_decode(env('FIREBASE_CREDENTIALS_BASE64')),
+                true
+            );
+    }
         $this->projectId       = config('services.fcm.project_id', '');
     }
 
