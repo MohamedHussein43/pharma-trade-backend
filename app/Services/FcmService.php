@@ -10,14 +10,16 @@ use Illuminate\Support\Facades\Log;
 
 class FcmService
 {
-    private string $credentialsPath;
-    private string $projectId;
+    private string  $credentialsPath;
+    private string  $credentialsBase64;
+    private string  $projectId;
     private ?string $accessToken = null;
 
     public function __construct()
     {
-        $this->credentialsPath = config('services.fcm.credentials_path', '');
-        $this->projectId       = config('services.fcm.project_id', '');
+        $this->credentialsPath   = config('services.fcm.credentials_path', '');
+        $this->credentialsBase64 = config('services.fcm.credentials_base64', '');
+        $this->projectId         = config('services.fcm.project_id', '');
     }
 
     // =========================================================
@@ -30,9 +32,10 @@ class FcmService
             return false;
         }
 
-        if (empty($this->credentialsPath) || empty($this->projectId)) {
-            Log::warning('FCM: FCM_CREDENTIALS_PATH or FCM_PROJECT_ID missing in .env');
-            $notification->update(['fcm_error' => 'Missing FCM credentials in .env']);
+        // ── FIXED: check project_id only — credentials checked in getAccessToken ──
+        if (empty($this->projectId)) {
+            Log::warning('FCM: FCM_PROJECT_ID not set in env.');
+            $notification->update(['fcm_error' => 'FCM_PROJECT_ID missing']);
             return false;
         }
 
@@ -49,21 +52,12 @@ class FcmService
             $notification->update(['fcm_error' => 'No device token stored for this user']);
             return false;
         }
-        if (! $user) {
-            $notification->update(['fcm_error' => 'User not found in DB']);
-            return false;
-        }
-
-        if (empty($this->credentialsPath) && empty(config('services.fcm.credentials_base64'))) {
-            $notification->update(['fcm_error' => 'FCM credentials not configured']);
-            return false;
-        }
 
         $token = $this->getAccessToken();
 
         if (! $token) {
             Log::error('FCM: Could not obtain OAuth2 access token.');
-            $notification->update(['fcm_error' => 'Failed to obtain OAuth2 token']);
+            $notification->update(['fcm_error' => 'Failed to obtain OAuth2 token — check credentials']);
             return false;
         }
 
@@ -102,8 +96,7 @@ class FcmService
         ];
 
         try {
-            Log::info("FCM: Sending to user {$notification->user_id}, token prefix: " .
-                substr($user->device_token, 0, 20));
+            Log::info("FCM: Sending notification #{$notification->id} to user {$notification->user_id}");
 
             $response = Http::withHeaders([
                 'Authorization' => 'Bearer ' . $token,
@@ -115,7 +108,7 @@ class FcmService
             $responseBody = $response->body();
             $responseJson = $response->json();
 
-            Log::info("FCM: Response status {$response->status()}: {$responseBody}");
+            Log::info("FCM: Response {$response->status()}: {$responseBody}");
 
             if ($response->successful()) {
                 $notification->update([
@@ -123,11 +116,10 @@ class FcmService
                     'fcm_sent_at' => now(),
                     'fcm_error'   => null,
                 ]);
-                Log::info("FCM: Successfully sent notification {$notification->id}");
+                Log::info("FCM: Successfully sent notification #{$notification->id}");
                 return true;
             }
 
-            // Extract error details from response
             $errorMessage = $responseJson['error']['message']
                 ?? $responseJson['error']['status']
                 ?? $responseBody;
@@ -143,7 +135,6 @@ class FcmService
                 'fcm_error' => substr("{$errorCode}: {$errorMessage}", 0, 500),
             ]);
 
-            // Token is invalid — clear it
             if (in_array($errorCode, ['UNREGISTERED', 'INVALID_ARGUMENT'])) {
                 $user->update(['device_token' => null]);
                 Log::info("FCM: Cleared invalid token for user {$user->id}");
@@ -152,15 +143,68 @@ class FcmService
             return false;
 
         } catch (\Exception $e) {
-            $errorMsg = $e->getMessage();
-            Log::error("FCM: Exception — {$errorMsg}");
-            $notification->update(['fcm_error' => substr($errorMsg, 0, 500)]);
+            Log::error("FCM: Exception — " . $e->getMessage());
+            $notification->update(['fcm_error' => substr($e->getMessage(), 0, 500)]);
             return false;
         }
     }
 
     // =========================================================
-    // PRIVATE — Get OAuth2 token using URL-safe base64
+    // PRIVATE — Load credentials from base64 OR file path
+    //
+    // Priority:
+    //   1. FIREBASE_CREDENTIALS_BASE64 env var  ← Railway / production
+    //   2. FCM_CREDENTIALS_PATH file            ← local / ngrok
+    //
+    // This means:
+    //   - Set FIREBASE_CREDENTIALS_BASE64 on Railway → works on server
+    //   - Set FCM_CREDENTIALS_PATH in .env locally → works on XAMPP
+    //   - Both can coexist — base64 always wins if set
+    // =========================================================
+    private function loadCredentials(): ?array
+    {
+        // ── Option 1: base64 env var (Railway / production) ───
+        if (! empty($this->credentialsBase64)) {
+            Log::info('FCM: Loading credentials from FIREBASE_CREDENTIALS_BASE64');
+
+            $json        = base64_decode($this->credentialsBase64, true);
+            $credentials = $json ? json_decode($json, true) : null;
+
+            if (empty($credentials['private_key']) || empty($credentials['client_email'])) {
+                Log::error('FCM: FIREBASE_CREDENTIALS_BASE64 decoded but missing private_key or client_email — check base64 is correct');
+                return null;
+            }
+
+            Log::info("FCM: Credentials loaded from base64 — client_email: {$credentials['client_email']}");
+            return $credentials;
+        }
+
+        // ── Option 2: file path (local / ngrok) ───────────────
+        if (! empty($this->credentialsPath)) {
+            if (! file_exists($this->credentialsPath)) {
+                Log::error("FCM: Credentials file not found at path: {$this->credentialsPath}");
+                return null;
+            }
+
+            Log::info("FCM: Loading credentials from file: {$this->credentialsPath}");
+            $credentials = json_decode(file_get_contents($this->credentialsPath), true);
+
+            if (empty($credentials['private_key']) || empty($credentials['client_email'])) {
+                Log::error('FCM: Credentials file exists but missing private_key or client_email');
+                return null;
+            }
+
+            Log::info("FCM: Credentials loaded from file — client_email: {$credentials['client_email']}");
+            return $credentials;
+        }
+
+        // ── Neither set ────────────────────────────────────────
+        Log::error('FCM: No credentials configured. Set FIREBASE_CREDENTIALS_BASE64 (production) or FCM_CREDENTIALS_PATH (local)');
+        return null;
+    }
+
+    // =========================================================
+    // PRIVATE — Get OAuth2 access token
     // =========================================================
     private function getAccessToken(): ?string
     {
@@ -168,22 +212,14 @@ class FcmService
             return $this->accessToken;
         }
 
-        if (! file_exists($this->credentialsPath)) {
-            Log::error("FCM: Credentials file not found: {$this->credentialsPath}");
+        $credentials = $this->loadCredentials();
+        if (! $credentials) {
             return null;
         }
 
         try {
-            $credentials = json_decode(file_get_contents($this->credentialsPath), true);
-
-            if (empty($credentials['private_key']) || empty($credentials['client_email'])) {
-                Log::error('FCM: Invalid credentials — missing private_key or client_email.');
-                return null;
-            }
-
             $now = time();
 
-            // URL-safe base64 encoding required by Google JWT spec
             $header = $this->base64UrlEncode(json_encode([
                 'alg' => 'RS256',
                 'typ' => 'JWT',
@@ -198,20 +234,20 @@ class FcmService
             ]));
 
             $toSign = "{$header}.{$claim}";
-
             openssl_sign($toSign, $signature, $credentials['private_key'], 'SHA256');
-
             $jwt = "{$toSign}." . $this->base64UrlEncode($signature);
 
-            $response = Http::asForm()
-                ->timeout(10)
-                ->post('https://oauth2.googleapis.com/token', [
+            $response = Http::asForm()->timeout(10)->post(
+                'https://oauth2.googleapis.com/token',
+                [
                     'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
                     'assertion'  => $jwt,
-                ]);
+                ]
+            );
 
             if ($response->successful()) {
                 $this->accessToken = $response->json('access_token');
+                Log::info('FCM: OAuth2 token obtained successfully');
                 return $this->accessToken;
             }
 
@@ -224,10 +260,6 @@ class FcmService
         }
     }
 
-    // =========================================================
-    // PRIVATE — URL-safe base64 encoding (RFC 4648)
-    // Standard base64_encode uses + and / which are invalid in JWT
-    // =========================================================
     private function base64UrlEncode(string $data): string
     {
         return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
