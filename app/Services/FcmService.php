@@ -63,32 +63,39 @@ class FcmService
 
         $url = "https://fcm.googleapis.com/v1/projects/{$this->projectId}/messages:send";
 
-        $payload = [
+         $payload = [
             'message' => [
-                'token'        => $user->device_token,
-                'notification' => [
-                    'title' => $notification->title,
-                    'body'  => $notification->body,
-                ],
-                'data' => [
-                    'notification_id' => (string)$notification->id,
+                'token'   => $user->device_token,
+
+                // ── Data-only payload ─────────────────────────
+                // All fields go in data{} — Flutter handles display
+                // This gives Flutter full control over notification
+                // appearance and tap behaviour
+                'data'    => [
+                    'title'           => $notification->title,
+                    'body'            => $notification->body,
                     'type'            => (string)$notification->type,
                     'notifiable_type' => (string)$notification->notifiable_type,
                     'notifiable_id'   => (string)$notification->notifiable_id,
-                    'click_action'    => 'FLUTTER_NOTIFICATION_CLICK',
+                    'notification_id' => (string)$notification->id,
                 ],
+
+                // ── Android config ────────────────────────────
+                // High priority ensures delivery even when app
+                // is in background or device is in doze mode
                 'android' => [
-                    'priority'     => 'high',
-                    'notification' => [
-                        'sound'        => 'default',
-                        'click_action' => 'FLUTTER_NOTIFICATION_CLICK',
-                    ],
+                    'priority' => 'high',
                 ],
-                'apns' => [
+
+                // ── APNS (iOS) config ─────────────────────────
+                'apns'    => [
+                    'headers' => [
+                        'apns-priority' => '10',
+                    ],
                     'payload' => [
                         'aps' => [
-                            'sound' => 'default',
-                            'badge' => $this->getUnreadCount($notification->user_id),
+                            'content-available' => 1,
+                            'sound'             => 'default',
                         ],
                     ],
                 ],
