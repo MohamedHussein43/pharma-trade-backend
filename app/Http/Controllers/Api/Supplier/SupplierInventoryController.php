@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\Supplier;
 use App\Http\Controllers\Controller;
 use App\Jobs\ProcessInventoryUpload;
 use App\Models\InventoryUploadLog;
+use Illuminate\Support\Facades\Log;
 use App\Models\SupplierInventory;
 use App\Models\Drug;
 use Illuminate\Http\JsonResponse;
@@ -234,6 +235,12 @@ class SupplierInventoryController extends Controller
     // =========================================================
   public function store(Request $request): JsonResponse
     {
+        Log::info('Incoming API Request', [
+        'method' => $request->method(),
+        'url' => $request->fullUrl(),
+        'headers' => $request->headers->all(),
+        'body' => $request->all(),
+    ]);
         $supplier = $request->user()->supplier;
         if (! $supplier) {
             return response()->json(['message' => 'Supplier account not found.'], 404);
@@ -274,7 +281,7 @@ class SupplierInventoryController extends Controller
         }
 
         // Accept either pharmacist_price or unit_price — same field
-        $pharmacistPrice = round((float)($request->pharmacist_price ?? $request->unit_price), 2);
+        $pharmacistPrice = round((float)($request->pharmacist_price - ($request->pharmacist_price * (($request->discount_pct ?? 1)/100)) ?? $request->unit_price - ($request->unit_price * (($request->discount_pct ?? 1)/100)) ), 2);
         $publicPrice     = round((float)$request->public_price, 2);
 
         $item = SupplierInventory::create([

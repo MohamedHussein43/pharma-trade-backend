@@ -179,7 +179,7 @@ class AdminRegistrationController extends Controller
                     'is_read'         => 0,
                 ]);*/
                 $notificationService = app(\App\Services\NotificationService::class);
-                $notificationService->registrationApproved($request->user()->id, (string)($req->entity_type ?? 'user'));
+                $notificationService->registrationApproved($regRequest->user_id, (string)($req->entity_type ?? 'user'));
 
                 return $entityId;
             });
