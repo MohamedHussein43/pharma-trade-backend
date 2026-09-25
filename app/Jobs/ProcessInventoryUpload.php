@@ -12,66 +12,83 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Storage;
 use Maatwebsite\Excel\Facades\Excel;
 
 class ProcessInventoryUpload implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $tries   = 3;
+    public int $tries   = 1;
     public int $timeout = 300;
-    public int $backoff = 60;
 
     public function __construct(
         private int    $supplierId,
         private int    $logId,
-        private string $filePath,
+        private string $extension,
     ) {}
 
     public function handle(): void
     {
         $log = InventoryUploadLog::find($this->logId);
         if (! $log) {
-            Log::error("ProcessInventoryUpload: Log ID {$this->logId} not found.");
+            Log::error("ProcessInventoryUpload: Log #{$this->logId} not found in DB.");
             return;
         }
 
+        Log::info("ProcessInventoryUpload: Starting", [
+            'log_id'      => $this->logId,
+            'supplier_id' => $this->supplierId,
+            'extension'   => $this->extension,
+        ]);
+
         try {
-            $drugCatalog = $this->loadDrugCatalog();
-
-            if (! Storage::disk('private')->exists($this->filePath)) {
-                throw new \Exception("Upload file not found at path: {$this->filePath}");
+            // ── Step 1: Read file_content from DB ─────────────
+            if (empty($log->file_content)) {
+                throw new \Exception("file_content is empty in DB for log #{$this->logId}.");
             }
 
-            $fullPath = Storage::disk('private')->path($this->filePath);
-            $sheets   = Excel::toArray([], $fullPath);
-            $rows     = $sheets[0] ?? [];
+            Log::info("ProcessInventoryUpload: file_content found, length=" . strlen($log->file_content));
 
+            // ── Step 2: Decode base64 ─────────────────────────
+            $fileContent = base64_decode($log->file_content, true);
+            if ($fileContent === false || empty($fileContent)) {
+                throw new \Exception("base64_decode failed — file_content is not valid base64.");
+            }
+
+            Log::info("ProcessInventoryUpload: Decoded, size=" . strlen($fileContent) . " bytes");
+
+            // ── Step 3: Write to temp file ────────────────────
+            $tmpPath = sys_get_temp_dir() . DIRECTORY_SEPARATOR
+                . 'inv_' . $this->logId . '_' . time() . '.' . $this->extension;
+
+            $written = file_put_contents($tmpPath, $fileContent);
+            if ($written === false) {
+                throw new \Exception("Failed to write temp file to: {$tmpPath}");
+            }
+
+            Log::info("ProcessInventoryUpload: Temp file written to {$tmpPath}");
+
+            // ── Step 4: Read with Excel reader ────────────────
+            $sheets = Excel::toArray([], $tmpPath);
+            @unlink($tmpPath);
+
+            $rows = $sheets[0] ?? [];
             if (empty($rows)) {
-                throw new \Exception('The uploaded file is empty or could not be read.');
+                throw new \Exception('File is empty or could not be read.');
             }
 
-            // ── FIXED: Safe cell reading that handles Arabic text ──
-            // Always cast to string using strval() not (string) cast
-            // Then convert Arabic-Indic numerals to Western
-            /*$rawHeaders = array_map(
-                fn($h) => $this->safeString($h),
-                $rows[0]
-            );*/
-            $rawHeaders = array_map(fn($h) => $this->safeString($h), array_values($rows[0]));
+            Log::info("ProcessInventoryUpload: Excel read, total rows=" . count($rows));
 
-            $headers = array_map(
-                fn($h) => $this->normaliseHeader($h),
-                $rawHeaders
-            );
+            // ── Step 5: Normalise headers ─────────────────────
+            $rawHeaders = array_map(fn($h) => trim((string)$h), array_values($rows[0]));
+            $headers    = array_map(fn($h) => $this->normaliseHeader($h), $rawHeaders);
 
-            // Log headers for debugging
-            Log::info('ProcessInventoryUpload: Headers detected', [
+            Log::info('ProcessInventoryUpload: Headers', [
                 'raw'        => $rawHeaders,
                 'normalised' => $headers,
             ]);
 
+            // ── Step 6: Process rows ──────────────────────────
             $dataRows = array_filter(
                 array_slice($rows, 1),
                 fn($row) => count(array_filter(array_map('strval', $row))) > 0
@@ -83,105 +100,67 @@ class ProcessInventoryUpload implements ShouldQueue
             $newDrugsAdded = 0;
             $errors        = [];
             $batch         = [];
+            $drugCatalog   = $this->loadDrugCatalog();
 
+            Log::info("ProcessInventoryUpload: Data rows to process={$totalRows}");
             $log->update(['total_rows' => $totalRows]);
 
             foreach (array_values($dataRows) as $index => $row) {
                 $rowNum = $index + 2;
-                $row    = array_values($row); // ← force 0-based index
-                // ── FIXED: Safe cell reading per row ──────────────
+                $row    = array_values($row); // force 0-based index
+
                 $data = [];
                 foreach ($headers as $colIndex => $header) {
-                    $raw          = $row[$colIndex] ?? null;
+                    $raw           = $row[$colIndex] ?? null;
                     $data[$header] = $raw !== null
                         ? $this->convertArabicNumerals($this->safeString($raw))
                         : null;
                 }
 
-                // Log first row for debugging
                 if ($index === 0) {
-                    Log::info('ProcessInventoryUpload: First data row', ['data' => $data]);
+                    Log::info('ProcessInventoryUpload: First row sample', ['data' => $data]);
                 }
 
-                $drugName = $data['drug_name']
-                    ?? $data['name']
-                    ?? $data['medicine']
-                    ?? $data['product_name']
-                    ?? $data['item_name']
-                    ?? null;
-
-                $quantity = $data['quantity']
-                    ?? $data['qty']
-                    ?? $data['stock']
-                    ?? '0';
-
-                $publicPrice = $data['public_price']
-                    ?? $data['public']
-                    ?? $data['retail_price']
-                    ?? $data['retail']
-                    ?? '0';
-
-                $pharmacistPrice = $data['pharmacist_price']
-                    ?? $data['pharmacist']
-                    ?? $data['unit_price']
-                    ?? $data['price']
-                    ?? $data['cost']
-                    ?? '0';
-
-                $discount = $data['discount']
-                    ?? $data['discount_pct']
-                    ?? $data['disc']
-                    ?? '0';
-
-                $orderLimit = $data['order_limit']
-                    ?? $data['limit']
-                    ?? $data['max_order']
-                    ?? $data['max']
-                    ?? null;
-
-                $barcode = $data['barcode']
-                    ?? $data['barcode_number']
-                    ?? null;
+                $drugName        = $data['drug_name']        ?? $data['name']       ?? $data['medicine'] ?? null;
+                $quantity        = $data['quantity']         ?? $data['qty']        ?? $data['stock']    ?? '0';
+                $publicPrice     = $data['public_price']     ?? $data['public']     ?? '0';
+                $pharmacistPrice = $data['pharmacist_price'] ?? $data['pharmacist'] ?? $data['unit_price'] ?? $data['price'] ?? '0';
+                $discount        = $data['discount']         ?? $data['discount_pct'] ?? '0';
+                $orderLimit      = $data['order_limit']      ?? $data['limit']      ?? $data['max']      ?? null;
+                $barcode         = $data['barcode']          ?? null;
 
                 $orderLimitVal = null;
                 if (! empty($orderLimit) && is_numeric($orderLimit) && (int)$orderLimit > 0) {
                     $orderLimitVal = (int)$orderLimit;
                 }
 
-                // ── Validation ────────────────────────────────────
                 if (empty($drugName) || trim($drugName) === '') {
-                    $errors[] = "Row {$rowNum}: Drug name is empty — row skipped.";
+                    $errors[] = "Row {$rowNum}: Drug name is empty — skipped.";
                     $failedRows++;
                     continue;
                 }
 
                 if (! is_numeric($quantity) || (float)$quantity < 0) {
-                    $errors[] = "Row {$rowNum}: Invalid quantity '{$quantity}' for '{$drugName}' — row skipped.";
+                    $errors[] = "Row {$rowNum}: Invalid quantity '{$quantity}' for '{$drugName}' — skipped.";
                     $failedRows++;
                     continue;
                 }
 
                 if (! is_numeric($pharmacistPrice) || (float)$pharmacistPrice < 0) {
-                    $errors[] = "Row {$rowNum}: Invalid pharmacist price '{$pharmacistPrice}' for '{$drugName}' — row skipped.";
+                    $errors[] = "Row {$rowNum}: Invalid price '{$pharmacistPrice}' for '{$drugName}' — skipped.";
                     $failedRows++;
                     continue;
                 }
 
                 if (! is_numeric($publicPrice) || (float)$publicPrice < 0) {
-                    $errors[] = "Row {$rowNum}: Invalid public price '{$publicPrice}' for '{$drugName}' — row skipped.";
-                    $failedRows++;
-                    continue;
+                    $publicPrice = $pharmacistPrice;
                 }
 
-                $discountVal = (float)$discount;
-                if ($discountVal < 0 || $discountVal > 100) {
-                    $errors[] = "Row {$rowNum}: Discount must be 0–100 for '{$drugName}' — row skipped.";
-                    $failedRows++;
-                    continue;
-                }
+                $discountVal = is_numeric($discount) ? (float)$discount : 0;
+                if ($discountVal < 0 || $discountVal > 100) $discountVal = 0;
 
                 if ($this->isBannedDrugCheckEnabled() && $this->isBannedDrug($drugName)) {
-                    $errors[] = "Row {$rowNum}: '{$drugName}' is on the restricted list — row skipped.";
+                    $errors[] = "Row {$rowNum}: '{$drugName}' is on the restricted list — skipped.";
                     $failedRows++;
                     continue;
                 }
@@ -208,10 +187,7 @@ class ProcessInventoryUpload implements ShouldQueue
                 if (count($batch) >= 100) {
                     $this->flushBatch($batch);
                     $batch = [];
-                    $log->update([
-                        'success_rows' => $successRows,
-                        'failed_rows'  => $failedRows,
-                    ]);
+                    $log->update(['success_rows' => $successRows, 'failed_rows' => $failedRows]);
                 }
             }
 
@@ -219,34 +195,36 @@ class ProcessInventoryUpload implements ShouldQueue
                 $this->flushBatch($batch);
             }
 
-            $summaryNote = $newDrugsAdded > 0
-                ? " {$newDrugsAdded} new drug(s) added to catalog automatically."
-                : null;
+            Log::info("ProcessInventoryUpload: Done — success={$successRows}, failed={$failedRows}, newDrugs={$newDrugsAdded}");
 
             $log->update([
                 'total_rows'   => $totalRows,
                 'success_rows' => $successRows,
                 'failed_rows'  => $failedRows,
                 'status'       => 'completed',
+                'file_content' => null,
                 'error_log'    => ! empty($errors)
-                    ? json_encode(array_merge($errors, $summaryNote ? [$summaryNote] : []), JSON_UNESCAPED_UNICODE)
-                    : ($summaryNote ? json_encode([$summaryNote]) : null),
+                    ? json_encode($errors, JSON_UNESCAPED_UNICODE)
+                    : null,
             ]);
 
             $this->notifySupplier($successRows, $failedRows, $newDrugsAdded);
-            Storage::disk('private')->delete($this->filePath);
 
         } catch (\Exception $e) {
-            Log::error("ProcessInventoryUpload failed: " . $e->getMessage(), [
-                'supplier_id' => $this->supplierId,
+            Log::error("ProcessInventoryUpload FAILED: " . $e->getMessage(), [
                 'log_id'      => $this->logId,
+                'supplier_id' => $this->supplierId,
+                'trace'       => $e->getTraceAsString(),
             ]);
+
             $log?->update([
-                'status'    => 'failed',
-                'error_log' => json_encode([$e->getMessage()]),
+                'status'       => 'failed',
+                'file_content' => null,
+                'error_log'    => json_encode([$e->getMessage()], JSON_UNESCAPED_UNICODE),
             ]);
+
             $this->notifySupplierFailed();
-            throw $e;
+            // Do NOT throw — prevents retry and duplicate failure notifications
         }
     }
 
@@ -257,30 +235,22 @@ class ProcessInventoryUpload implements ShouldQueue
             'log_id'      => $this->logId,
             'error'       => $exception->getMessage(),
         ]);
-        InventoryUploadLog::where('id', $this->logId)->update(['status' => 'failed']);
+
+        InventoryUploadLog::where('id', $this->logId)->update([
+            'status'       => 'failed',
+            'file_content' => null,
+            'error_log'    => json_encode([$exception->getMessage()]),
+        ]);
     }
 
     // =========================================================
-    // PRIVATE — Safe string conversion for Arabic text
-    // Handles null, float, int, and string cell values
-    // Uses mb_convert_encoding if available to ensure UTF-8
+    // PRIVATE — Safe string for Arabic/numeric cell values
     // =========================================================
-   private function safeString(mixed $value): string
+    private function safeString(mixed $value): string
     {
-        if ($value === null) {
-            return '';
-        }
-
-        // Excel reader returns numeric cells as float/int
-        // e.g. 100.0 → '100', not '100.0'
-        if (is_float($value) && floor($value) == $value) {
-            return (string)(int)$value;
-        }
-
-        if (is_int($value)) {
-            return (string)$value;
-        }
-
+        if ($value === null) return '';
+        if (is_float($value) && floor($value) == $value) return (string)(int)$value;
+        if (is_int($value)) return (string)$value;
         return trim((string)$value);
     }
 
@@ -290,10 +260,10 @@ class ProcessInventoryUpload implements ShouldQueue
     private function convertArabicNumerals(string $value): string
     {
         return strtr($value, [
-            '٠' => '0', '١' => '1', '٢' => '2', '٣' => '3', '٤' => '4',
-            '٥' => '5', '٦' => '6', '٧' => '7', '٨' => '8', '٩' => '9',
-            '۰' => '0', '۱' => '1', '۲' => '2', '۳' => '3', '۴' => '4',
-            '۵' => '5', '۶' => '6', '۷' => '7', '۸' => '8', '۹' => '9',
+            '٠'=>'0','١'=>'1','٢'=>'2','٣'=>'3','٤'=>'4',
+            '٥'=>'5','٦'=>'6','٧'=>'7','٨'=>'8','٩'=>'9',
+            '۰'=>'0','۱'=>'1','۲'=>'2','۳'=>'3','۴'=>'4',
+            '۵'=>'5','۶'=>'6','۷'=>'7','۸'=>'8','۹'=>'9',
         ]);
     }
 
@@ -302,87 +272,59 @@ class ProcessInventoryUpload implements ShouldQueue
     // =========================================================
     private function normaliseHeader(string $header): string
     {
-        // Only replace spaces and dashes — do NOT use strtolower on Arabic
-        // strtolower() corrupts Arabic Unicode on some PHP configs
         $normalised = str_replace([' ', '-', '/', '\\', "\t"], '_', trim($header));
 
         $arabicMap = [
-            'اسم_الدواء'          => 'drug_name',
-            'اسم_المنتج'          => 'drug_name',
-            'اسم_الدوا'           => 'drug_name',
-            'الدواء'              => 'drug_name',
-            'المنتج'              => 'drug_name',
-            'اسم_العلاج'          => 'drug_name',
-            'الاسم'               => 'drug_name',
-            'اسم'                 => 'drug_name',
-            'الاسم_التجارى'       => 'drug_name',
-            'الاسم_التجاري'       => 'drug_name',
-            'اسم_تجارى'           => 'drug_name',
-            'اسم_تجاري'           => 'drug_name',
-            'الاسم_العلمى'        => 'drug_name',
-            'الاسم_العلمي'        => 'drug_name',
-
-            'الكمية'              => 'quantity',
-            'كمية'                => 'quantity',
-            'كميه'                => 'quantity',
-            'الكميه'              => 'quantity',
-            'المخزون'             => 'quantity',
-            'مخزون'               => 'quantity',
-            'عدد'                 => 'quantity',
-            'الكمية_المتاحة'      => 'quantity',
-            'كمية_متاحة'          => 'quantity',
-            'الكمية_المتاحه'      => 'quantity',
-
-            'سعر_الجمهور'         => 'public_price',
-            'سعر_العام'           => 'public_price',
-            'السعر_العام'         => 'public_price',
-            'السعر_للجمهور'       => 'public_price',
-            'سعر_البيع_للعملاء'   => 'public_price',
-            'سعر_المستهلك'        => 'public_price',
-            'سعر_للجمهور'         => 'public_price',
-
-            'سعر_الصيدلى'         => 'pharmacist_price',
-            'سعر_الصيدلي'         => 'pharmacist_price',
-            'سعر_الصيدلية'        => 'pharmacist_price',
-            'السعر_للصيدلي'       => 'pharmacist_price',
-            'السعر_للصيدلى'       => 'pharmacist_price',
-            'سعر_البيع'           => 'pharmacist_price',
-            'السعر'               => 'pharmacist_price',
-            'سعر'                 => 'pharmacist_price',
-            'سعر_الشراء'          => 'pharmacist_price',
-            'سعر_التوريد'         => 'pharmacist_price',
-            'سعر_التكلفة'         => 'pharmacist_price',
-
-            'الخصم'               => 'discount',
-            'خصم'                 => 'discount',
-            'نسبة_الخصم'          => 'discount',
-            'تخفيض'               => 'discount',
-            'نسبة_التخفيض'        => 'discount',
-            'الخصم_%'             => 'discount',
-            'خصم_%'               => 'discount',
-
-            'الحد_الأقصى'         => 'order_limit',
-            'الحد_الاقصى'         => 'order_limit',
-            'حد_الطلب'            => 'order_limit',
-            'الحد'                => 'order_limit',
-            'أقصى_كمية'           => 'order_limit',
-            'اقصى_كميه'           => 'order_limit',
-            'الحد_الاقصى_للطلب'   => 'order_limit',
-            'أقصى_طلب'            => 'order_limit',
-
-            // English headers (keep for mixed files)
-            'drug_name'           => 'drug_name',
-            'name'                => 'name',
-            'medicine'            => 'medicine',
-            'quantity'            => 'quantity',
-            'qty'                 => 'qty',
-            'public_price'        => 'public_price',
-            'pharmacist_price'    => 'pharmacist_price',
-            'unit_price'          => 'unit_price',
-            'price'               => 'price',
-            'discount'            => 'discount',
-            'order_limit'         => 'order_limit',
-            'limit'               => 'limit',
+            'اسم_الدواء'       => 'drug_name',
+            'اسم_المنتج'       => 'drug_name',
+            'الدواء'           => 'drug_name',
+            'المنتج'           => 'drug_name',
+            'الاسم'            => 'drug_name',
+            'اسم'              => 'drug_name',
+            'الاسم_التجارى'    => 'drug_name',
+            'الاسم_التجاري'    => 'drug_name',
+            'اسم_تجارى'        => 'drug_name',
+            'اسم_تجاري'        => 'drug_name',
+            'الاسم_العلمى'     => 'drug_name',
+            'الاسم_العلمي'     => 'drug_name',
+            'الكمية'           => 'quantity',
+            'كمية'             => 'quantity',
+            'كميه'             => 'quantity',
+            'الكميه'           => 'quantity',
+            'المخزون'          => 'quantity',
+            'مخزون'            => 'quantity',
+            'عدد'              => 'quantity',
+            'الكمية_المتاحة'   => 'quantity',
+            'كمية_متاحة'       => 'quantity',
+            'سعر_الجمهور'      => 'public_price',
+            'سعر_العام'        => 'public_price',
+            'السعر_العام'      => 'public_price',
+            'السعر_للجمهور'    => 'public_price',
+            'سعر_البيع_للعملاء'=> 'public_price',
+            'سعر_المستهلك'     => 'public_price',
+            'سعر_الصيدلى'      => 'pharmacist_price',
+            'سعر_الصيدلي'      => 'pharmacist_price',
+            'سعر_الصيدلية'     => 'pharmacist_price',
+            'السعر_للصيدلي'    => 'pharmacist_price',
+            'السعر_للصيدلى'    => 'pharmacist_price',
+            'سعر_البيع'        => 'pharmacist_price',
+            'السعر'            => 'pharmacist_price',
+            'سعر'              => 'pharmacist_price',
+            'سعر_الشراء'       => 'pharmacist_price',
+            'سعر_التوريد'      => 'pharmacist_price',
+            'سعر_التكلفة'      => 'pharmacist_price',
+            'الخصم'            => 'discount',
+            'خصم'              => 'discount',
+            'نسبة_الخصم'       => 'discount',
+            'تخفيض'            => 'discount',
+            'نسبة_التخفيض'     => 'discount',
+            'الحد_الأقصى'      => 'order_limit',
+            'الحد_الاقصى'      => 'order_limit',
+            'حد_الطلب'         => 'order_limit',
+            'الحد'             => 'order_limit',
+            'أقصى_كمية'        => 'order_limit',
+            'اقصى_كميه'        => 'order_limit',
+            'الحد_الاقصى_للطلب'=> 'order_limit',
         ];
 
         return $arabicMap[$normalised] ?? $normalised;
@@ -394,9 +336,9 @@ class ProcessInventoryUpload implements ShouldQueue
         $catalog = ['by_barcode' => [], 'by_trade' => [], 'by_name' => []];
 
         foreach ($drugs as $drug) {
-            if (! empty($drug->barcode))    $catalog['by_barcode'][strtolower($drug->barcode)]    = $drug->id;
-            if (! empty($drug->trade_name)) $catalog['by_trade'][strtolower($drug->trade_name)]   = $drug->id;
-            if (! empty($drug->name))       $catalog['by_name'][strtolower($drug->name)]          = $drug->id;
+            if (! empty($drug->barcode))    $catalog['by_barcode'][strtolower($drug->barcode)]  = $drug->id;
+            if (! empty($drug->trade_name)) $catalog['by_trade'][strtolower($drug->trade_name)] = $drug->id;
+            if (! empty($drug->name))       $catalog['by_name'][strtolower($drug->name)]        = $drug->id;
         }
 
         return $catalog;
@@ -425,7 +367,12 @@ class ProcessInventoryUpload implements ShouldQueue
             }
         }
 
-        $newDrug = Drug::create(['name' => $drugName, 'trade_name' => $drugName, 'is_active' => 1]);
+        $newDrug = Drug::create([
+            'name'       => $drugName,
+            'trade_name' => $drugName,
+            'is_active'  => 1,
+        ]);
+
         $catalog['by_trade'][strtolower($drugName)] = $newDrug->id;
         $catalog['by_name'][strtolower($drugName)]  = $newDrug->id;
         $newDrugsAdded++;
@@ -462,7 +409,9 @@ class ProcessInventoryUpload implements ShouldQueue
         if (! $supplier?->user) return;
 
         $notificationService = app(\App\Services\NotificationService::class);
-        $notificationService->inventoryUploadComplete($supplier->user->id, $this->logId, $success, $failed);
+        $notificationService->inventoryUploadComplete(
+            $supplier->user->id, $this->logId, $success, $failed
+        );
     }
 
     private function notifySupplierFailed(): void

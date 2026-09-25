@@ -383,7 +383,7 @@ class SupplierInventoryController extends Controller
     // =========================================================
     // Upload methods — kept from previous controller
     // =========================================================
-    public function upload(Request $request): JsonResponse
+ public function upload(Request $request): JsonResponse
     {
         $request->validate([
             'file' => ['required', 'file', 'mimes:xlsx,xls,csv', 'max:10240'],
@@ -399,7 +399,8 @@ class SupplierInventoryController extends Controller
         }
 
         $alreadyProcessing = InventoryUploadLog::where('supplier_id', $supplier->id)
-            ->where('status', 'processing')->exists();
+            ->where('status', 'processing')
+            ->exists();
 
         if ($alreadyProcessing) {
             return response()->json([
@@ -407,24 +408,83 @@ class SupplierInventoryController extends Controller
             ], 422);
         }
 
-        $originalName = $request->file('file')->getClientOriginalName();
-        $storagePath  = $request->file('file')->storeAs(
-            'inventory-uploads/' . $supplier->id,
-            time() . '_' . $originalName,
-            'private'
-        );
+        $file         = $request->file('file');
+        $originalName = $file->getClientOriginalName();
+        $extension    = strtolower($file->getClientOriginalExtension());
 
+        // ── Read file content BEFORE any move/store operations ─
+        $realPath = $file->getRealPath();
+
+        if (! $realPath || ! file_exists($realPath)) {
+            return response()->json([
+                'message' => 'Could not read uploaded file. Please try again.',
+            ], 422);
+        }
+
+        $rawContent = file_get_contents($realPath);
+
+        if ($rawContent === false || empty($rawContent)) {
+            return response()->json([
+                'message' => 'Uploaded file is empty or could not be read.',
+            ], 422);
+        }
+
+        $fileContent = base64_encode($rawContent);
+
+        if (empty($fileContent)) {
+            return response()->json([
+                'message' => 'Failed to encode file. Please try again.',
+            ], 422);
+        }
+
+        \Illuminate\Support\Facades\Log::info('InventoryUpload: File received', [
+            'supplier_id'          => $supplier->id,
+            'file_name'            => $originalName,
+            'extension'            => $extension,
+            'raw_size_bytes'       => strlen($rawContent),
+            'base64_length'        => strlen($fileContent),
+            'real_path'            => $realPath,
+        ]);
+
+        // ── Create log row WITH file_content ──────────────────
         $log = InventoryUploadLog::create([
             'supplier_id'  => $supplier->id,
             'uploaded_by'  => $request->user()->id,
             'file_name'    => $originalName,
+            'file_content' => $fileContent,
             'total_rows'   => 0,
             'success_rows' => 0,
             'failed_rows'  => 0,
             'status'       => 'processing',
         ]);
 
-        ProcessInventoryUpload::dispatch($supplier->id, $log->id, $storagePath);
+        // ── Verify it was stored ──────────────────────────────
+        $log->refresh();
+
+        if (empty($log->file_content)) {
+            \Illuminate\Support\Facades\Log::error('InventoryUpload: file_content NOT saved to DB', [
+                'log_id' => $log->id,
+            ]);
+
+            $log->update(['status' => 'failed', 'error_log' => json_encode(['File content could not be saved to database.'])]);
+
+            return response()->json([
+                'message' => 'File could not be stored. Please try again.',
+            ], 500);
+        }
+
+        \Illuminate\Support\Facades\Log::info('InventoryUpload: Log created with file_content', [
+            'log_id'               => $log->id,
+            'file_content_length'  => strlen($log->file_content),
+        ]);
+
+        // ── Dispatch queue job ────────────────────────────────
+        ProcessInventoryUpload::dispatch($supplier->id, $log->id, $extension);
+
+        \Illuminate\Support\Facades\Log::info('InventoryUpload: Job dispatched', [
+            'log_id'      => $log->id,
+            'supplier_id' => $supplier->id,
+        ]);
 
         return response()->json([
             'message' => 'File received. Processing in background.',

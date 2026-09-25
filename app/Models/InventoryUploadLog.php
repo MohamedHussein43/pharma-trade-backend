@@ -15,6 +15,7 @@ class InventoryUploadLog extends Model
         'failed_rows',
         'status',
         'error_log',
+        'file_content',
     ];
 
     protected $casts = [
