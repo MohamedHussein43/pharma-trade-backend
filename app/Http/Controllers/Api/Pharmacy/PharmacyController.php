@@ -209,7 +209,7 @@ class PharmacyController extends Controller
     //   ?per_page=     — default 30
     //   ?supplier_id=  — filter to one specific supplier
     // =========================================================
-     public function availableDrugs(Request $request): JsonResponse
+    public function availableDrugs(Request $request): JsonResponse
     {
         $user   = $request->user();
         $branch = $user->pharmacyBranch;
@@ -227,58 +227,24 @@ class PharmacyController extends Controller
             ], 200);
         }
 
-        // Get eligible supplier IDs in this pharmacy's zone
-        $suppliersQuery = Supplier::where('is_active', 1)
-            ->where('approval_status', 'approved')
-            ->whereHas('zones', function ($q) use ($branchZoneIds) {
-                $q->whereIn('zones.id', $branchZoneIds);
-            });
-
-        if ($request->filled('supplier_id')) {
-            $suppliersQuery->where('id', (int)$request->supplier_id);
-        }
-
-        $eligibleSupplierIds = $suppliersQuery->pluck('id')->toArray();
+        // ── Eligible suppliers cached per branch — NO supplier_id filter here ──
+        $cacheKey            = "eligible_suppliers_branch_{$branch->id}";
+        $eligibleSupplierIds = \Illuminate\Support\Facades\Cache::remember(
+            $cacheKey, 300,
+            fn() => \App\Models\Supplier::where('is_active', 1)
+                ->where('approval_status', 'approved')
+                ->whereHas('zones', fn($q) => $q->whereIn('zones.id', $branchZoneIds))
+                ->pluck('id')
+                ->toArray()
+        );
 
         if (empty($eligibleSupplierIds)) {
             return response()->json([
                 'message' => 'No suppliers found in your zone.',
-                'data'    => [],
-            ], 200);
-        }
-
-        // Build query
-        $query = SupplierInventory::with([
-            'drug:id,name,trade_name,scientific_name,dosage_form,strength',
-            'supplier:id,name,min_order_value,min_order_qty',
-        ])
-        ->whereIn('supplier_id', $eligibleSupplierIds)
-        ->whereNotNull('drug_id')
-        ->where('quantity_available', '>', 0);  // ← ALWAYS enforced, no toggle
-
-        // Search by drug name
-        if ($request->filled('search')) {
-            $term = $request->search;
-            $query->where(function ($q) use ($term) {
-                $q->where('drug_name_raw', 'LIKE', "%{$term}%")
-                  ->orWhereHas('drug', function ($q2) use ($term) {
-                      $q2->where('trade_name',        'LIKE', "%{$term}%")
-                         ->orWhere('name',            'LIKE', "%{$term}%")
-                         ->orWhere('scientific_name', 'LIKE', "%{$term}%");
-                  });
-            });
-        }
-
-        // Fetch all rows for PHP-level grouping
-        $allRows = $query->get();
-
-        if ($allRows->isEmpty()) {
-            return response()->json([
-                'message' => 'No drugs available in your zone.',
                 'data'    => [
                     'data'          => [],
                     'total'         => 0,
-                    'per_page'      => (int)$request->get('per_page', 30),
+                    'per_page'      => 30,
                     'current_page'  => 1,
                     'last_page'     => 1,
                     'has_next_page' => false,
@@ -286,8 +252,52 @@ class PharmacyController extends Controller
             ], 200);
         }
 
-        // Map to response format
-        $mapped = $allRows->map(fn($item) => [
+        $perPage     = max(1, min(100, (int)$request->get('per_page', 20)));
+        $currentPage = max(1, (int)$request->get('page', 1));
+        $offset      = ($currentPage - 1) * $perPage;
+
+        // ── Build base query ──────────────────────────────────
+        $query = \App\Models\SupplierInventory::with([
+            'drug:id,name,trade_name,scientific_name,dosage_form,strength',
+            'supplier:id,name,min_order_value,min_order_qty',
+        ])
+        ->whereIn('supplier_id', $eligibleSupplierIds)
+        ->whereNotNull('drug_id')
+        ->where('quantity_available', '>', 0);
+
+        // ── supplier_id filter OUTSIDE cache ──────────────────
+        if ($request->filled('supplier_id')) {
+            $query->where('supplier_id', (int)$request->supplier_id);
+        }
+
+        // ── Search filter ─────────────────────────────────────
+        if ($request->filled('search')) {
+            $term = trim($request->search);
+            $query->where(function ($q) use ($term) {
+                $q->where('drug_name_raw', 'LIKE', "%{$term}%")
+                  ->orWhereHas('drug', fn($q2) => $q2
+                      ->where('trade_name',        'LIKE', "%{$term}%")
+                      ->orWhere('name',             'LIKE', "%{$term}%")
+                      ->orWhere('scientific_name',  'LIKE', "%{$term}%")
+                  );
+            });
+        }
+
+        // ── Count BEFORE join (avoids count inflation from join) ──
+        $total = $query->count();
+
+        // ── Sort and paginate ─────────────────────────────────
+        $rows = (clone $query)
+            ->join('drugs', 'drugs.id', '=', 'supplier_inventory.drug_id')
+            ->select('supplier_inventory.*')
+            ->orderBy('drugs.trade_name', 'asc')
+            ->orderBy('supplier_inventory.discount_pct', 'desc')
+            ->orderByRaw('supplier_inventory.unit_price * (1 - supplier_inventory.discount_pct / 100) asc')
+            ->offset($offset)
+            ->limit($perPage)
+            ->get();
+
+        $items = $rows->map(fn($item) => [
             'inventory_id'       => $item->id,
             'drug_id'            => $item->drug_id,
             'drug_name'          => $item->drug?->trade_name ?? $item->drug_name_raw,
@@ -299,12 +309,8 @@ class PharmacyController extends Controller
             'public_price'       => (float)$item->public_price,
             'pharmacist_price'   => (float)$item->pharmacist_price,
             'discount_pct'       => (float)$item->discount_pct,
-            'effective_price'    => round(
-                (float)$item->pharmacist_price * (1 - (float)$item->discount_pct / 100), 2
-            ),
-            'savings_per_unit'   => round(
-                (float)$item->public_price - ((float)$item->pharmacist_price * (1 - (float)$item->discount_pct / 100)), 2
-            ),
+            'effective_price'    => round((float)$item->pharmacist_price * (1 - (float)$item->discount_pct / 100), 2),
+            'savings_per_unit'   => round((float)$item->public_price - ((float)$item->pharmacist_price * (1 - (float)$item->discount_pct / 100)), 2),
             'quantity_available' => $item->quantity_available,
             'order_limit'        => $item->order_limit,
             'last_updated'       => $item->last_updated,
@@ -316,22 +322,7 @@ class PharmacyController extends Controller
             ],
         ]);
 
-        // Group by drug_name → within each group sort by discount DESC
-        // → flatten → alphabetical by drug name
-        $sorted = $mapped
-            ->groupBy('drug_name')
-            ->map(fn($group) => $group->sortByDesc('discount_pct')->values())
-            ->sortKeys()
-            ->flatten(1)
-            ->values();
-
-        // Paginate the final sorted flat list
-        $perPage     = max(1, (int)$request->get('per_page', 30));
-        $currentPage = max(1, (int)$request->get('page', 1));
-        $total       = $sorted->count();
-        $lastPage    = max(1, (int)ceil($total / $perPage));
-        $offset      = ($currentPage - 1) * $perPage;
-        $items       = $sorted->slice($offset, $perPage)->values();
+        $lastPage = max(1, (int)ceil($total / $perPage));
 
         return response()->json([
             'message' => 'Available drugs retrieved successfully.',
@@ -345,6 +336,7 @@ class PharmacyController extends Controller
             ],
         ], 200);
     }
+
 
     // =========================================================
     // POST /api/v1/pharmacy/orders/{id}/confirm-delivery

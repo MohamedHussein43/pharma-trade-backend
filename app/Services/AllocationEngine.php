@@ -119,7 +119,20 @@ class AllocationEngine
             ]);
         });
 
-        return $order->fresh(['supplierOrders.orderItems', 'supplierOrders.supplier']);
+        return $order->load([
+        'supplierOrders' => fn($q) => $q->select([
+            'id', 'master_order_id', 'supplier_id',
+            'order_number', 'status', 'subtotal',
+            'commission_pct', 'commission_value',
+        ]),
+        'supplierOrders.supplier:id,name,min_order_value',
+        'supplierOrders.orderItems' => fn($q) => $q->select([
+            'id', 'supplier_order_id', 'drug_id',
+            'drug_name_raw', 'quantity_requested',
+            'unit_price', 'discount_pct', 'line_total',
+        ]),
+        'supplierOrders.orderItems.drug:id,trade_name,dosage_form,strength',
+    ]);
     }
 
     // =========================================================
@@ -146,7 +159,8 @@ class AllocationEngine
         array      $inventory,
         Collection $orderItems,
         string     $mode
-    ): array {
+    ): array 
+    {
         $supplierMap   = $suppliers->keyBy('id');
         $belowMinimum  = [];
 
@@ -272,16 +286,20 @@ class AllocationEngine
     // =========================================================
     private function getEligibleSuppliers(array $branchZoneIds, MasterOrder $order): Collection
     {
-        $query = Supplier::with('zones')
-            ->where('is_active', 1)
-            ->where('approval_status', 'approved')
-            ->whereHas('zones', function ($q) use ($branchZoneIds) {
-                $q->whereIn('zones.id', $branchZoneIds);
-            });
+        $query = Supplier::select('suppliers.*')
+            ->with('zones:id,name')          // eager load zones
+            ->where('suppliers.is_active', 1)
+            ->where('suppliers.approval_status', 'approved')
+            ->join('supplier_zones', 'supplier_zones.supplier_id', '=', 'suppliers.id')
+            ->whereIn('supplier_zones.zone_id', $branchZoneIds)
+            ->distinct();                     // avoid duplicates if multi-zone
 
-        if ($order->order_mode === 'specific_supplier' && $order->notes) {
-            $supplierId = (int)$order->notes;
-            if ($supplierId) $query->where('id', $supplierId);
+        if ($order->order_mode === 'specific_supplier') {
+            // Read preferred_supplier_id from notes or dedicated column
+            $supplierId = (int)($order->preferred_supplier_id ?? $order->notes ?? 0);
+            if ($supplierId) {
+                $query->where('suppliers.id', $supplierId);
+            }
         }
 
         return $query->get();
@@ -292,17 +310,29 @@ class AllocationEngine
     // =========================================================
     private function loadInventory(array $supplierIds, array $drugIds): array
     {
-        $rows = SupplierInventory::whereIn('supplier_id', $supplierIds)
-            ->whereIn('drug_id', $drugIds)
-            ->where('quantity_available', '>', 0)
-            ->get();
+        // Select only columns needed by the engine
+        $rows = SupplierInventory::select([
+            'supplier_id',
+            'drug_id',
+            'quantity_available',
+            'order_limit',
+            'unit_price',
+            'pharmacist_price',
+            'discount_pct',
+        ])
+        ->whereIn('supplier_id', $supplierIds)
+        ->whereIn('drug_id', $drugIds)
+        ->where('quantity_available', '>', 0)
+        ->get();
 
         $matrix = [];
         foreach ($rows as $row) {
             $matrix[$row->supplier_id][$row->drug_id] = $row;
         }
+
         return $matrix;
     }
+
 
     // =========================================================
     // PRIVATE — Best discount allocation
