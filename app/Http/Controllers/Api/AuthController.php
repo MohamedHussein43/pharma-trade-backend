@@ -358,30 +358,38 @@ class AuthController extends Controller
      * Accepts:  licence_image        (required)
      *           licence_image_back   (optional)
      */
-    private function storeLicenceImages(Request $request, int $requestId): void
+        private function storeLicenceImages(Request $request, int $requestId): void
     {
         $images = [];
- 
+
         if ($request->hasFile('licence_image')) {
             $images[] = ['file' => $request->file('licence_image'), 'is_primary' => 1];
         }
- 
+
         if ($request->hasFile('licence_image_back')) {
             $images[] = ['file' => $request->file('licence_image_back'), 'is_primary' => 0];
         }
- 
+
         foreach ($images as $img) {
-            // Store in private disk — never public
-            // Path: licences/2024/03/random_hash.jpg
-            $path = $img['file']->store('licences/' . date('Y/m'), 'private');
- 
+            $file = $img['file'];
+
+            // ── Read content BEFORE store() moves the file ────
+            // After store() the original temp file is gone
+            $fileContent = base64_encode(
+                file_get_contents($file->getRealPath())
+            );
+
+            // Store to disk (still useful for local dev)
+            $path = $file->store('licences/' . date('Y/m'), 'private');
+
             LicenceImage::create([
                 'registration_request_id' => $requestId,
                 'file_path'               => $path,
-                'file_name'               => $img['file']->getClientOriginalName(),
-                'mime_type'               => $img['file']->getMimeType(),
-                'file_size_kb'            => (int) ceil($img['file']->getSize() / 1024),
+                'file_name'               => $file->getClientOriginalName(),
+                'mime_type'               => $file->getMimeType(),
+                'file_size_kb'            => (int) ceil($file->getSize() / 1024),
                 'is_primary'              => $img['is_primary'],
+                'file_content'            => $fileContent,  // ← only addition
             ]);
         }
     }

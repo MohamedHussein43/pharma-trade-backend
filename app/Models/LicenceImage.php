@@ -10,11 +10,17 @@ class LicenceImage extends Model
         'registration_request_id',
         'file_path',
         'file_name',
+        'file_content', 
         'mime_type',
         'file_size_kb',
         'is_primary',
         'uploaded_at',
     ];
+
+        protected $hidden = [
+        'file_content',    // ← hide from JSON by default (too large)
+    ];
+
  
     protected $casts = [
         'is_primary'  => 'boolean',
@@ -29,6 +35,14 @@ class LicenceImage extends Model
         return $this->belongsTo(RegistrationRequest::class, 'registration_request_id');
     }
  
+        // Helper to get image as base64 data URL
+    public function toDataUrl(): ?string
+    {
+        if (! empty($this->file_content)) {
+            return "data:{$this->mime_type};base64,{$this->file_content}";
+        }
+        return null;
+    }
     // ── Helpers ──────────────────────────────────────────────
  
     /**

@@ -422,24 +422,6 @@ class AdminRegistrationController extends Controller
     // =========================================================
     private function formatRequest(RegistrationRequest $req): array
     {
-        $images = $req->licenceImages->map(function ($img) {
-            return [
-                'id'         => $img->id,
-                'file_name'  => $img->file_name,
-                'mime_type'  => $img->mime_type,
-                'is_primary' => $img->is_primary,
-                'size_kb'    => $img->file_size_kb,
-                // Signed URL valid for 60 minutes — never expose raw file_path
-                'url'        => Storage::disk('private')->exists($img->file_path)
-                                ? URL::temporarySignedRoute(
-                                    'admin.licence.view',
-                                    now()->addMinutes(60),
-                                    ['image' => $img->id]
-                                )
-                                : null,
-            ];
-        });
-
         return [
             'id'             => $req->id,
             'entity_type'    => $req->entity_type,
@@ -456,7 +438,26 @@ class AdminRegistrationController extends Controller
             'reviewed_at'    => $req->reviewed_at,
             'reviewer'       => $req->reviewer,
             'applicant'      => $req->user,
-            'licence_images' => $images,
+
+            // ── Licence images with data_url included ─────────
+            'licence_images' => $req->licenceImages->map(fn($img) => [
+                'id'         => $img->id,
+                'file_name'  => $img->file_name,
+                'mime_type'  => $img->mime_type,
+                'size_kb'    => $img->file_size_kb,
+                'is_primary' => (bool)$img->is_primary,
+
+                // data_url included directly — Flutter uses this
+                // No second API call needed
+                'data_url'   => ! empty($img->file_content)
+                    ? "data:{$img->mime_type};base64,{$img->file_content}"
+                    : null,
+
+                // Fallback URL for old records without file_content
+                'url' => url("/api/v1/admin/registration-requests/{$req->id}/licence-image-url?image_id={$img->id}"),
+            ])->values()->toArray(),
+
+            'has_licence_image' => $req->licenceImages->isNotEmpty(),
         ];
     }
 

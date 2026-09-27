@@ -110,6 +110,13 @@ Route::prefix('v1')->middleware('auth:sanctum')->group(function () {
             // Licence image viewer (signed URL)
             Route::get('/licences/{image}/view', [LicenceImageController::class, 'view'])
                 ->name('admin.licence.view');
+            // View licence image as raw file (browser/Postman)
+            Route::get('/registration-requests/{id}/licence-image',
+                [LicenceImageController::class, 'show']);
+
+            // Get base64 data URL (Flutter app)
+            Route::get('/registration-requests/{id}/licence-image-url',
+                [LicenceImageController::class, 'dataUrl']);
 
 
             // ... existing admin routes (registration-requests, zones, drugs) ...
