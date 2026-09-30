@@ -27,7 +27,9 @@ class AuthController extends Controller
             'phone'        => ['required', 'string'],
             'password'     => ['required', 'string'],
             'device_token' => ['nullable', 'string', 'max:255'],
-        ], [
+	    'device_name'  => ['nullable', 'string', 'max:100'], // optional: track device
+	], 
+	[
             'phone.required'    => 'Phone number is required.',
             'password.required' => 'Password is required.',
         ]);
@@ -64,16 +66,19 @@ class AuthController extends Controller
             ], 403);
         }
 
-        // Store device token if provided
+        // ── Update device token if provided ───────────────────
+        // Store in users table for FCM push notifications
         $updateData = ['last_login_at' => now()];
         if ($request->filled('device_token')) {
             $updateData['device_token'] = $request->device_token;
         }
         $user->update($updateData);
 
-        // Revoke old tokens and create fresh one
-        $user->tokens()->delete();
-        $token = $user->createToken('auth_token')->plainTextToken;
+        // ── Create NEW token WITHOUT deleting existing ones ───
+        // This allows multiple devices to be logged in at once
+        // Each device gets its own token
+        $deviceName = $request->device_name ?? 'device_' . now()->timestamp;
+        $token      = $user->createToken($deviceName)->plainTextToken;
 
         return response()->json([
             'message' => 'Login successful.',
@@ -95,18 +100,10 @@ class AuthController extends Controller
 
      public function logout(Request $request): JsonResponse
     {
-        $user = $request->user();
- 
-        // Clear device token so FCM push stops for this device
-        $user->update(['device_token' => null]);
- 
-        // Delete only the token used in this request (not all tokens)
-        // This allows multi-device logout to be scoped correctly.
+        // Delete only the current request's token
         $request->user()->currentAccessToken()->delete();
- 
-        return response()->json([
-            'message' => 'Logged out successfully.',
-        ], 200);
+
+        return response()->json(['message' => 'Logged out successfully.'], 200);
     }
 
     public function logoutAll(Request $request): JsonResponse

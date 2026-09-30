@@ -208,24 +208,74 @@ class NotificationService
         }
     }
 
-    public function registrationApproved(int $userId, string $entityType): void
+ public function registrationApproved(int $userId, ?string $entityType = null): void
     {
+        switch ($entityType) {
+            case 'zone_update':
+                $title = 'تم قبول طلب تحديث المناطق';
+                $body  = 'تمت الموافقة على طلب تحديث المناطق الخاص بك. تم تحديث مناطق التوصيل الخاصة بك.';
+                break;
+
+            case 'licence_update':
+                $title = 'تم قبول طلب تحديث الرخصة';
+                $body  = 'تمت الموافقة على طلب تحديث الرخصة الخاص بك. تم تحديث بيانات الرخصة.';
+                break;
+
+            case 'pharmacy':
+                $title = 'تم قبول طلب التسجيل';
+                $body  = 'تمت الموافقة على طلب تسجيل الصيدلية. يمكنك الآن تسجيل الدخول والبدء.';
+                break;
+
+            case 'supplier':
+                $title = 'تم قبول طلب التسجيل';
+                $body  = 'تمت الموافقة على طلب تسجيل شركتك. يمكنك الآن تسجيل الدخول والبدء.';
+                break;
+
+            default:
+                $title = 'تم قبول طلبك';
+                $body  = 'تمت مراجعة طلبك والموافقة عليه.';
+                break;
+        }
+
         $this->send(
             userId:         $userId,
-            title:          'تم قبول طلبك',
-            body:           'تم مراجعة طلب تسجيلك والموافقة عليه. يمكنك الآن تسجيل الدخول.',
+            title:          $title,
+            body:           $body,
             type:           'registration_approved',
             notifiableType: 'User',
             notifiableId:   $userId,
         );
     }
 
-    public function registrationDeclined(int $userId, string $reason): void
+    public function registrationDeclined(int $userId, string $reason, ?string $entityType = null): void
     {
+        switch ($entityType) {
+            case 'zone_update':
+                $title = 'تم رفض طلب تحديث المناطق';
+                $body  = "تم رفض طلب تحديث المناطق. السبب: {$reason}";
+                break;
+
+            case 'licence_update':
+                $title = 'تم رفض طلب تحديث الرخصة';
+                $body  = "تم رفض طلب تحديث الرخصة. السبب: {$reason}";
+                break;
+
+            case 'pharmacy':
+            case 'supplier':
+                $title = 'تم رفض طلب التسجيل';
+                $body  = "تم رفض طلب تسجيلك. السبب: {$reason}";
+                break;
+
+            default:
+                $title = 'تم رفض طلبك';
+                $body  = "تم رفض طلبك. السبب: {$reason}";
+                break;
+        }
+
         $this->send(
             userId:         $userId,
-            title:          'تم رفض طلبك',
-            body:           "تم رفض طلب تسجيلك. السبب: {$reason}",
+            title:          $title,
+            body:           $body,
             type:           'registration_declined',
             notifiableType: 'User',
             notifiableId:   $userId,

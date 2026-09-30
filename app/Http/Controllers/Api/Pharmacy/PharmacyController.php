@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\MasterOrder;
 use App\Models\Notification;
 use App\Models\Supplier;
+use Illuminate\Support\Facades\Log;
 use App\Models\SupplierInventory;
 use App\Models\SupplierOrder;
 use Illuminate\Http\JsonResponse;
@@ -211,6 +212,12 @@ class PharmacyController extends Controller
     // =========================================================
     public function availableDrugs(Request $request): JsonResponse
     {
+        Log::info('Incoming API Request', [
+        'method' => $request->method(),
+        'url' => $request->fullUrl(),
+        'headers' => $request->headers->all(),
+        'body' => $request->all(),
+    ]);
         $user   = $request->user();
         $branch = $user->pharmacyBranch;
 

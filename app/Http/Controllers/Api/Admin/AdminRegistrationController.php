@@ -248,7 +248,7 @@ class AdminRegistrationController extends Controller
 
             // ── Notify the applicant with reason ──
             $notificationService = app(\App\Services\NotificationService::class);
-            $notificationService->registrationDeclined($request->user()->id, $request->decline_reason);
+            $notificationService->registrationDeclined($request->user()->id, $request->decline_reason, $request->entity_type );
             /*Notification::create([
                 'user_id'         => $regRequest->user_id,
                 'title'           => 'Registration request declined',

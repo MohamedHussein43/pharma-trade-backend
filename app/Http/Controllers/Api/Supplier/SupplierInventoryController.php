@@ -281,7 +281,9 @@ class SupplierInventoryController extends Controller
         }
 
         // Accept either pharmacist_price or unit_price — same field
-        $pharmacistPrice = round((float)($request->pharmacist_price - ($request->pharmacist_price * (($request->discount_pct ?? 1)/100)) ?? $request->unit_price - ($request->unit_price * (($request->discount_pct ?? 1)/100)) ), 2);
+        $pharmacistPrice = round((float)(/*$request->pharmacist_price - ( $request->pharmacist_price * (($request->discount_pct ?? 1)/100)) ??*/
+                                                                        $request->unit_price - ($request->unit_price * (($request->discount_pct ?? 1)/100)) 
+                                        ), 2);
         $publicPrice     = round((float)$request->public_price, 2);
 
         $item = SupplierInventory::create([
