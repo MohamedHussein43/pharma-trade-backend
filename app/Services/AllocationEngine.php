@@ -227,12 +227,13 @@ class AllocationEngine
                     }
 
                     // Compute line total at this alternative supplier's price
-                    $newLineTotal = round(
+                    /*$newLineTotal = round(
                         $item['quantity_requested']
                         * $altInvRow->unit_price
                         * (1 - $altInvRow->discount_pct / 100),
                         2
-                    );
+                    );*/
+                    $lineTotal = round($item['quantity_requested'] * $altInvRow->unit_price, 2);
 
                     // Move item to alternative supplier
                     $allocation['supplier_splits'][$altSupplierId][] = [
@@ -373,7 +374,8 @@ class AllocationEngine
                 if ($remainingQty <= 0) break;
 
                 $allocatedQty = min($remainingQty, $sup['quantity']);
-                $lineTotal    = round($allocatedQty * $sup['unit_price'] * (1 - $sup['discount_pct'] / 100), 2);
+                //$lineTotal      = round($allocatedQty * $sup['unit_price'] * (1 - $sup['discount_pct'] / 100), 2);
+                $lineTotal      = round($allocatedQty * $sup['unit_price'], 2);
 
                 $splits[$sup['supplier_id']][] = [
                     'drug_id'            => $drugId,
@@ -410,7 +412,8 @@ class AllocationEngine
             $invRow    = $inventory[$supplier->id][$drugId] ?? null;
             $unitPrice = $invRow?->unit_price  ?? 0;
             $discPct   = $invRow?->discount_pct ?? 0;
-            $lineTotal = round($orderItem->quantity_requested * $unitPrice * (1 - $discPct / 100), 2);
+            //$lineTotal = round($orderItem->quantity_requested * $unitPrice * (1 - $discPct / 100), 2);
+            $lineTotal = round($orderItem->quantity_requested * $unitPrice, 2);
 
             $splits[$supplier->id][] = [
                 'drug_id'            => $drugId,
