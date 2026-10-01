@@ -34,32 +34,48 @@ class AdminRegistrationController extends Controller
     // =========================================================
     public function index(Request $request): JsonResponse
     {
-        $query = RegistrationRequest::with([
+        $query = \App\Models\RegistrationRequest::with([
             'user:id,name,email,phone,role,status',
             'zone:id,name,governorate',
             'reviewer:id,name',
-            'licenceImages',
+            // ← DO NOT eager load licenceImages in list
+            // base64 content makes response huge and slow
         ])
         ->orderBy('created_at', 'desc');
 
-        // Filter by status (default: pending)
         if ($request->has('status')) {
             $query->where('status', $request->status);
         } else {
             $query->where('status', 'pending');
         }
 
-        // Filter by entity type
         if ($request->has('entity_type')) {
             $query->where('entity_type', $request->entity_type);
         }
 
         $requests = $query->paginate($request->get('per_page', 15));
 
-        // Transform to add signed image URLs
-        $requests->getCollection()->transform(function ($req) {
-            return $this->formatRequest($req);
-        });
+        // Transform — lightweight, no images
+        $requests->getCollection()->transform(fn($req) => [
+            'id'             => $req->id,
+            'entity_type'    => $req->entity_type,
+            'business_name'  => $req->business_name,
+            'applicant_name' => $req->applicant_name,
+            'licence_number' => $req->licence_number,
+            'phone'          => $req->phone,
+            'address'        => $req->address,
+            'zone'           => $req->zone,
+            'status'         => $req->status,
+            'decline_reason' => $req->decline_reason,
+            'submitted_at'   => $req->created_at,
+            'reviewed_at'    => $req->reviewed_at,
+            'reviewer'       => $req->reviewer,
+            'applicant'      => $req->user,
+            // Only indicate if images exist — don't load them
+            'has_licence_image' => \App\Models\LicenceImage::where('registration_request_id', $req->id)
+                ->exists(),
+            // No licence_images array here — load in show() only
+        ]);
 
         return response()->json([
             'message' => 'Registration requests retrieved successfully.',
