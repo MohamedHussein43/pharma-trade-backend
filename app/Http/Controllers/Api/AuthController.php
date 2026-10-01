@@ -28,57 +28,67 @@ class AuthController extends Controller
             'password'     => ['required', 'string'],
             'device_token' => ['nullable', 'string', 'max:255'],
 	    'device_name'  => ['nullable', 'string', 'max:100'], // optional: track device
-	], 
-	[
-            'phone.required'    => 'Phone number is required.',
-            'password.required' => 'Password is required.',
-        ]);
+        ], 
+        [
+                'phone.required'    => 'Phone number is required.',
+                'password.required' => 'Password is required.',
+            ]);
 
-        // Find user by phone
-        $user = \App\Models\User::where('phone', $request->phone)->first();
+                $user = \App\Models\User::where('phone', $request->phone)->first();
 
         if (! $user || ! \Illuminate\Support\Facades\Hash::check($request->password, $user->password)) {
             return response()->json([
                 'message' => 'Invalid credentials.',
-                'errors'  => [
-                    'phone' => ['The phone number or password is incorrect.'],
-                ],
+                'errors'  => ['phone' => ['The phone number or password is incorrect.']],
             ], 401);
         }
 
-        // Check if account is active
-        // (pending/suspended users get a specific message)
-        if (! $user->is_active || $user->status === 'suspended') {
+        if ($user->status === 'suspended') {
             return response()->json([
-                'message' => 'Your account is not active. Please contact support.',
-                'data'    => [
-                    'status' => $user->status,
-                ],
+                'message' => 'Your account has been suspended. Please contact support.',
+                'data'    => ['status' => 'suspended'],
             ], 403);
         }
 
         if ($user->status === 'pending_approval') {
             return response()->json([
                 'message' => 'Your account is pending admin approval.',
-                'data'    => [
-                    'status' => 'pending_approval',
-                ],
+                'data'    => ['status' => 'pending_approval'],
             ], 403);
         }
 
-        // ── Update device token if provided ───────────────────
-        // Store in users table for FCM push notifications
-        $updateData = ['last_login_at' => now()];
+        // ── Store device_token for THIS user ──────────────────
+        // If another user was using this device_token before,
+        // remove it from that user first to avoid cross-user notifications
         if ($request->filled('device_token')) {
-            $updateData['device_token'] = $request->device_token;
-        }
-        $user->update($updateData);
+            $deviceToken = $request->device_token;
 
-        // ── Create NEW token WITHOUT deleting existing ones ───
-        // This allows multiple devices to be logged in at once
-        // Each device gets its own token
+            // Remove this token from any OTHER user who had it
+            \App\Models\User::where('device_token', $deviceToken)
+                ->where('id', '!=', $user->id)
+                ->update(['device_token' => null]);
+
+            // Store for current user
+            $user->update([
+                'device_token'  => $deviceToken,
+                'last_login_at' => now(),
+            ]);
+        } else {
+            $user->update(['last_login_at' => now()]);
+        }
+
+        // Create new token without deleting existing ones
         $deviceName = $request->device_name ?? 'device_' . now()->timestamp;
         $token      = $user->createToken($deviceName)->plainTextToken;
+
+        // Clean up old tokens — keep max 5 per user
+        $tokenCount = $user->tokens()->count();
+        if ($tokenCount > 5) {
+            $user->tokens()
+                ->orderBy('created_at', 'asc')
+                ->limit($tokenCount - 5)
+                ->delete();
+        }
 
         return response()->json([
             'message' => 'Login successful.',
@@ -100,8 +110,16 @@ class AuthController extends Controller
 
      public function logout(Request $request): JsonResponse
     {
-        // Delete only the current request's token
-        $request->user()->currentAccessToken()->delete();
+       $user = $request->user();
+
+        // ── Clear device_token on logout ──────────────────────
+        // This ensures the token doesn't stay assigned to this user
+        // after they log out — prevents notifications going to
+        // a device that's now logged in as a different user
+        $user->update(['device_token' => null]);
+
+        // Delete only current device token
+        $user->currentAccessToken()->delete();
 
         return response()->json(['message' => 'Logged out successfully.'], 200);
     }
