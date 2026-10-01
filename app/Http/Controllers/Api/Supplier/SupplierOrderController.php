@@ -176,7 +176,7 @@ class SupplierOrderController extends Controller
 
                 // Line total uses confirmed quantity
                 $lineTotal = round(
-                    $confirmed * $item->unit_price * (1 - $item->discount_pct / 100), 2
+                    $confirmed * $item->unit_price, 2
                 );
 
                 // ── Fix 3: Update supplier_inventory stock ────────────
