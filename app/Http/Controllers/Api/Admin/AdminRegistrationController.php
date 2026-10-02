@@ -16,6 +16,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Log;
 
 
 use App\Http\Requests\LoginRequest;
@@ -34,6 +35,11 @@ class AdminRegistrationController extends Controller
     // =========================================================
     public function index(Request $request): JsonResponse
     {
+        Log::info('Incoming API Request', [
+        'method' => $request->method(),
+        'url' => $request->fullUrl(),
+        'body' => $request->all(),
+        ]);
         $query = \App\Models\RegistrationRequest::with([
             'user:id,name,email,phone,role,status',
             'zone:id,name,governorate',
@@ -75,6 +81,9 @@ class AdminRegistrationController extends Controller
             'has_licence_image' => \App\Models\LicenceImage::where('registration_request_id', $req->id)
                 ->exists(),
             // No licence_images array here — load in show() only
+        ]);
+        Log::info('response API Request', [
+        'response' =>  $requests,
         ]);
 
         return response()->json([
@@ -264,7 +273,7 @@ class AdminRegistrationController extends Controller
 
             // ── Notify the applicant with reason ──
             $notificationService = app(\App\Services\NotificationService::class);
-            $notificationService->registrationDeclined($request->user()->id, $request->decline_reason, $request->entity_type );
+            $notificationService->registrationDeclined($regRequest->user_id, $request->decline_reason, $request->entity_type );
             /*Notification::create([
                 'user_id'         => $regRequest->user_id,
                 'title'           => 'Registration request declined',

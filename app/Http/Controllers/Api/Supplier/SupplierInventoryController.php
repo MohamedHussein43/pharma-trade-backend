@@ -169,9 +169,9 @@ class SupplierInventoryController extends Controller
         }
 
         // Accept either pharmacist_price or unit_price
-        $newPrice = $request->pharmacist_price ?? $request->unit_price ?? null;
+        $newPrice = $request->unit_price ?? $request->public_price ?? null;
         if ($newPrice !== null) {
-            $updateData['pharmacist_price'] = round((float)$newPrice, 2);
+            $updateData['pharmacist_price'] = round((float)$newPrice - ($newPrice * (($request->discount_pct ?? 1)/100)) , 2);
             $updateData['unit_price']       = round((float)$newPrice, 2);
         }
 

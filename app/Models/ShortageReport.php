@@ -23,13 +23,18 @@ class ShortageReport extends Model
 
     // ── Relationships ────────────────────────────────────────
 
-    public function supplierOrder()
+    public function orderItem()
     {
-        return $this->belongsTo(SupplierOrder::class, 'supplier_order_id');
+        return $this->belongsTo(\App\Models\OrderItem::class, 'order_item_id');
     }
 
     public function drug()
     {
-        return $this->belongsTo(Drug::class, 'drug_id');
+        return $this->belongsTo(\App\Models\Drug::class, 'drug_id');
+    }
+
+    public function supplierOrder()
+    {
+        return $this->belongsTo(\App\Models\SupplierOrder::class, 'supplier_order_id');
     }
 }

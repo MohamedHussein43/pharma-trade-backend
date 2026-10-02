@@ -14,6 +14,7 @@ use Illuminate\Support\Facades\DB;
 use App\Services\FcmService;
 use App\Services\WhatsAppService;
 use App\Services\NotificationService;
+use Illuminate\Support\Facades\Log;
 
 
 
@@ -259,7 +260,7 @@ class SupplierOrderController extends Controller
 
         $order = SupplierOrder::where('id', $id)
             ->where('supplier_id', $supplier->id)
-            ->whereIn('status', ['confirmed', 'partially_available'])
+            ->whereIn('status', ['pending', 'confirmed', 'partially_available'])
             ->first();
 
         if (! $order) {
@@ -267,49 +268,85 @@ class SupplierOrderController extends Controller
         }
 
         $request->validate([
-            'items'                       => ['required', 'array', 'min:1'],
-            'items.*.order_item_id'       => ['required', 'integer', 'exists:order_items,id'],
-            'items.*.quantity_short'      => ['required', 'integer', 'min:1'],
-            'items.*.notes'               => ['nullable', 'string', 'max:255'],
+            'items'                        => ['required', 'array', 'min:1'],
+            'items.*.order_item_id'        => ['required', 'integer', 'exists:order_items,id'],
+            'items.*.quantity_short'       => ['required', 'integer', 'min:1'],
+            'items.*.notes'                => ['nullable', 'string', 'max:255'],
         ]);
 
-        DB::transaction(function () use ($request, $order) {
+        DB::transaction(function () use ($request, $order, $supplier) {
             foreach ($request->items as $itemData) {
+
                 $item = OrderItem::where('id', $itemData['order_item_id'])
-                    ->where('supplier_order_id', $order->id)
+                    ->where(function ($q) use ($order) {
+                        $q->where('supplier_order_id', $order->id)
+                          ->orWhere('master_order_id', $order->master_order_id);
+                    })
                     ->first();
 
-                if (! $item) continue;
+                if (! $item) {
+                    Log::warning("reportShortage: item {$itemData['order_item_id']} not found");
+                    continue;
+                }
 
-                // Update the item status
+                $quantityShort     = (int)$itemData['quantity_short'];
+                $quantityRequested = (int)$item->quantity_requested;
+
+                // Cap shortage at requested quantity
+                $quantityShort     = min($quantityShort, $quantityRequested);
+                $quantityConfirmed = max(0, $quantityRequested - $quantityShort);
+                $lineTotal         = round($quantityConfirmed * $item->unit_price, 2);
+
                 $item->update([
+                    'supplier_order_id'  => $order->id,
+                    'quantity_confirmed' => $quantityConfirmed,
+                    'line_total'         => $lineTotal,
                     'status'             => 'short',
-                    'quantity_confirmed' => max(0, $item->quantity_confirmed - $itemData['quantity_short']),
                 ]);
 
-                // Create or update shortage report
                 ShortageReport::updateOrCreate(
                     [
                         'supplier_order_id' => $order->id,
                         'drug_id'           => $item->drug_id,
                     ],
                     [
-                        'quantity_short' => $itemData['quantity_short'],
+                        'order_item_id'  => $item->id,
+                        'quantity_short' => $quantityShort,
                         'notes'          => $itemData['notes'] ?? null,
                         'resolved'       => 0,
                     ]
                 );
+
+                // Decrement inventory only for what can be provided
+                if ($quantityConfirmed > 0 && $item->drug_id) {
+                    \App\Models\SupplierInventory::where('supplier_id', $supplier->id)
+                        ->where('drug_id', $item->drug_id)
+                        ->decrement('quantity_available', $quantityConfirmed);
+                }
             }
 
-            $order->update(['status' => 'partially_available']);
+            // Recalculate subtotal
+            $subtotal        = OrderItem::where('supplier_order_id', $order->id)->sum('line_total');
+            $commissionValue = round($subtotal * ($order->commission_pct ?? 1) / 100, 2);
+
+            $order->update([
+                'status'           => 'partially_available',
+                'subtotal'         => $subtotal,
+                'commission_value' => $commissionValue,
+                'confirmed_at'     => now(),
+            ]);
+
             $this->updateMasterOrderStatus($order->master_order_id, true);
-            $this->notifyPharmacyShortage($order);
         });
 
         $this->notifier->orderConfirmedForPharmacy($order->fresh(), true);
+
         return response()->json([
-            'message' => 'Shortage reported successfully. The pharmacy has been notified.',
-            'data'    => ['order_status' => 'partially_available'],
+            'message' => 'Shortage reported. Pharmacy has been notified.',
+            'data'    => [
+                'order_id'     => $order->id,
+                'order_status' => 'partially_available',
+            ],
         ], 200);
     }
 

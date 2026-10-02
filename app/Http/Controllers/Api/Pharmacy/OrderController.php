@@ -47,7 +47,7 @@ class OrderController extends Controller
     // GET /api/v1/pharmacy/orders/{id}
     // Full order detail with all supplier splits and items.
     // =========================================================
-    public function show(Request $request, int $id): JsonResponse
+   public function show(Request $request, int $id): JsonResponse
     {
         $branch = $request->user()->pharmacyBranch;
 
@@ -63,9 +63,29 @@ class OrderController extends Controller
             return response()->json(['message' => 'Order not found.'], 404);
         }
 
+        // Build shortage list here and PASS it to formatOrder
+        $unresolvedShortages = \App\Models\ShortageReport::query()
+            ->whereHas('supplierOrder', fn($q) => $q->where('master_order_id', $order->id))
+            ->where('resolved', 0)
+            ->with([
+                'supplierOrder.supplier:id,name',
+                'drug:id,trade_name',
+                'orderItem:id,drug_name_raw',   // ← get drug_name_raw from order item
+            ])
+            ->get()
+            ->map(fn($sr) => [
+                'id'             => $sr->id,
+                'drug_name'      => $sr->drug?->trade_name
+                                    ?? $sr->orderItem?->drug_name_raw
+                                    ?? 'Unknown drug',
+                'quantity_short' => $sr->quantity_short,
+                'supplier_name'  => $sr->supplierOrder?->supplier?->name,
+                'notes'          => $sr->notes,
+            ]);
+
         return response()->json([
             'message' => 'Order retrieved successfully.',
-            'data'    => $this->formatOrder($order),
+            'data'    => $this->formatOrder($order, $unresolvedShortages), // ← pass it in
         ], 200);
     }
 
@@ -463,16 +483,25 @@ class OrderController extends Controller
         return 'ORD-' . $year . '-' . str_pad($latest, 5, '0', STR_PAD_LEFT);
     }
 
-    private function formatOrder(MasterOrder $order): array
+    private function formatOrder(MasterOrder $order, $unresolvedShortages = null): array
     {
+        // Default to empty collection if not passed (for other callers of formatOrder)
+        $unresolvedShortages = $unresolvedShortages ?? collect();
+
         return [
-            'id'            => $order->id,
-            'order_number'  => $order->order_number,
-            'order_mode'    => $order->order_mode,
-            'status'        => $order->status,
-            'total_value'   => $order->total_value,
-            'notes'         => $order->notes,
-            'created_at'    => $order->created_at,
+            'id'           => $order->id,
+            'order_number' => $order->order_number,
+            'order_mode'   => $order->order_mode,
+            'status'       => $order->status,
+            'total_value'  => $order->total_value,
+            'notes'        => $order->notes,
+            'created_at'   => $order->created_at,
+
+            // ── Shortage section ──────────────────────────────
+            'has_shortage'         => $unresolvedShortages->isNotEmpty(),
+            'unresolved_shortages' => $unresolvedShortages->values(),
+
+            // ── Supplier orders ───────────────────────────────
             'supplier_orders' => $order->supplierOrders->map(fn($so) => [
                 'id'           => $so->id,
                 'order_number' => $so->order_number,
