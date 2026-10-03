@@ -201,7 +201,7 @@ class SupplierOrderController extends Controller
                 $subtotal += $lineTotal;
 
                 // Track shortages
-                if ($short > 0) {
+                if (1 > 2 /*$short > 0*/) {
                     $hasShortage     = true;
                     $shortageItems[] = [
                         'supplier_order_id' => $order->id,
@@ -228,7 +228,7 @@ class SupplierOrderController extends Controller
             }
 
             // Update master order status
-            $this->updateMasterOrderStatus($order->master_order_id, $hasShortage);
+            $this->updateMasterOrderStatus($order->master_order_id, $hasShortage, $subtotal);
 
             // Notify pharmacy
             //$this->notifyPharmacy($order, $hasShortage);
@@ -480,7 +480,7 @@ class SupplierOrderController extends Controller
     // PRIVATE — Update master order status based on
     // the collective state of all its supplier orders
     // =========================================================
-    private function updateMasterOrderStatus(int $masterOrderId, bool $hasShortage): void
+    private function updateMasterOrderStatus(int $masterOrderId, bool $hasShortage, int $subtotal = 0): void
     {
         $supplierOrders = SupplierOrder::where('master_order_id', $masterOrderId)->get();
 
@@ -496,8 +496,12 @@ class SupplierOrderController extends Controller
         } else {
             $newStatus = 'pending_supplier_confirmation';
         }
-
-        MasterOrder::where('id', $masterOrderId)->update(['status' => $newStatus]);
+        if ($subtotal > 0) {
+                    MasterOrder::where('id', $masterOrderId)->update(['status' => $newStatus, 'total_value' => $subtotal]);
+        }
+        else {
+            MasterOrder::where('id', $masterOrderId)->update(['status' => $newStatus]);
+        }
     }
 
     // =========================================================

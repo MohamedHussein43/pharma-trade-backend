@@ -7,11 +7,13 @@ use App\Models\MasterOrder;
 use App\Models\Notification;
 use App\Models\ShortageReport;
 use App\Models\SupplierOrder;
+USE App\Models\OrderItem;
 use App\Services\AllocationEngine;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use App\Services\NotificationService;
+use Illuminate\Support\Facades\Log;
 
 class AllocateOrderController extends Controller
 {
@@ -182,66 +184,174 @@ class AllocateOrderController extends Controller
     {
         $branch = $request->user()->pharmacyBranch;
 
-        $order = MasterOrder::where('id', $id)
-            ->where('pharmacy_branch_id', $branch->id)
-            ->where('status', 'partially_available')
-            ->first();
-
-        if (! $order) {
-            return response()->json([
-                'message' => 'Order not found or has no shortages to resolve.',
-            ], 404);
+        if (! $branch) {
+            return response()->json(['message' => 'Pharmacy branch not found.'], 403);
         }
 
         $request->validate([
-            'action'              => ['required', 'in:accept_alternatives,cancel_short_items'],
-            'shortage_report_ids' => ['required', 'array'],
-            'shortage_report_ids.*' => ['integer', 'exists:shortage_reports,id'],
+            'action'                => ['required', 'in:accept_alternatives,cancel_short_items'],
+            'shortage_report_ids'   => ['sometimes', 'array'],
+            'shortage_report_ids.*' => ['integer'],
         ]);
 
-        DB::transaction(function () use ($request, $order) {
-            $shortages = ShortageReport::whereIn('id', $request->shortage_report_ids)
-                ->where('resolved', 0)
-                ->get();
+        $order = MasterOrder::with([
+            'supplierOrders.orderItems.drug',
+            'supplierOrders.shortageReports',   // ← through supplierOrders
+        ])
+            ->where('id', $id)
+            ->where('pharmacy_branch_id', $branch->id)
+            ->whereIn('status', [
+                'shortage',
+                'partially_available',
+                'pending_supplier_confirmation',
+            ])
+            ->first();
 
-            if ($request->action === 'accept_alternatives') {
-                // Re-run allocation for only the short items
-                foreach ($shortages as $shortage) {
-                    $shortage->update(['resolved' => 1, 'resolved_at' => now()]);
+        if (! $order) {
+            return response()->json(['message' => 'Order not found or not in shortage state.'], 404);
+        }
+
+        $action = $request->action;
+
+        DB::transaction(function () use ($request, $order, $action) {
+
+            // Collect all unresolved shortage reports across all supplier orders
+            $unresolvedShortages = collect();
+            foreach ($order->supplierOrders as $so) {
+                $unresolvedShortages = $unresolvedShortages->merge(
+                    $so->shortageReports->where('resolved', 0)
+                );
+            }
+
+            // Filter by submitted IDs if provided
+            if ($request->filled('shortage_report_ids')) {
+                $unresolvedShortages = $unresolvedShortages
+                    ->whereIn('id', $request->shortage_report_ids);
+            }
+
+            if ($unresolvedShortages->isEmpty()) {
+                return;
+            }
+
+            if ($action === 'cancel_short_items') {
+                // ── Cancel short items, keep confirmed quantities ─────────
+
+                foreach ($unresolvedShortages as $shortage) {
+                    $item = $this->findOrderItem($order, $shortage);
+
+                    if ($item) {
+                        $confirmedQty = $item->quantity_confirmed ?? 0;
+                        $item->update([
+                            'quantity_requested' => $confirmedQty,
+                            'line_total'         => round($confirmedQty * $item->unit_price, 2),
+                            'status'             => $confirmedQty > 0 ? 'confirmed' : 'cancelled',
+                        ]);
+                    }
+
+                    $shortage->update(['resolved' => 1, 'resolution' => 'cancelled']);
                 }
 
-                // Check if all shortages resolved
-                $unresolved = ShortageReport::whereHas('supplierOrder', function ($q) use ($order) {
-                    $q->where('master_order_id', $order->id);
-                })->where('resolved', 0)->count();
+                // Update each affected supplier order subtotal/status
+                foreach ($order->supplierOrders as $so) {
+                    $freshItems  = $so->orderItems()->get();
+                    $allCancelled = $freshItems->every(fn($i) => $i->status === 'cancelled');
 
-                if ($unresolved === 0) {
-                    $order->update(['status' => 'confirmed']);
+                    if ($allCancelled) {
+                        $so->update(['status' => 'cancelled']);
+                    } else {
+                        $newSubtotal = $freshItems->where('status', '!=', 'cancelled')->sum('line_total');
+                        $so->update([
+                            'subtotal'         => round($newSubtotal, 2),
+                            'commission_value' => round($newSubtotal * $so->commission_pct / 100, 2),
+                        ]);
+                    }
                 }
+
+                // Recalculate master order total
+                $newTotal = $order->supplierOrders()
+                    ->where('status', '!=', 'cancelled')
+                    ->get()->sum('subtotal');
+
+                $order->update([
+                    'status'      => 'confirmed',
+                    'total_value' => round($newTotal, 2),
+                ]);
+
             } else {
-                // Cancel the short items
-                foreach ($shortages as $shortage) {
-                    $shortage->update(['resolved' => 1, 'resolved_at' => now()]);
-                    // Mark order item as cancelled
-                    \App\Models\OrderItem::where('supplier_order_id', $shortage->supplier_order_id)
-                        ->where('drug_id', $shortage->drug_id)
-                        ->update(['status' => 'cancelled']);
+                // ── accept_alternatives: reduce quantity_requested ────────
+                // KEY FIX: set quantity_requested = accepted qty so supplier
+                // re-confirm() sees short = 0 and doesn't create new shortage
+
+                foreach ($unresolvedShortages as $shortage) {
+                    $item = $this->findOrderItem($order, $shortage);
+
+                    if ($item) {
+                        $acceptedQty = max(0, $item->quantity_requested - $shortage->quantity_short);
+
+                        $item->update([
+                            'quantity_requested' => $acceptedQty,
+                            'quantity_confirmed' => $acceptedQty,
+                            'line_total'         => round($acceptedQty * $item->unit_price, 2),
+                            'status'             => $acceptedQty > 0 ? 'pending' : 'cancelled',
+                        ]);
+                    }
+
+                    $shortage->update(['resolved' => 1, 'resolution' => 'accepted']);
                 }
 
-                // Check if remaining items are all confirmed
-                $pendingItems = \App\Models\OrderItem::whereHas('supplierOrder', function ($q) use ($order) {
-                    $q->where('master_order_id', $order->id);
-                })->whereNotIn('status', ['confirmed', 'cancelled'])->count();
+                // Reset affected supplier orders to pending for re-confirmation
+                foreach ($order->supplierOrders as $so) {
+                    $freshItems = $so->orderItems()->get();
+                    $hasActive  = $freshItems->contains(
+                        fn($i) => in_array($i->status, ['pending', 'confirmed'])
+                    );
 
-                if ($pendingItems === 0) {
-                    $order->update(['status' => 'confirmed']);
+                    if ($hasActive) {
+                        $so->update([
+                            'status'       => 'pending',
+                            'confirmed_at' => null,
+                        ]);
+                    }
                 }
+
+                // Recalculate master order total
+                $newTotal = OrderItem::whereHas('supplierOrder', fn($q) =>
+                    $q->where('master_order_id', $order->id)
+                    ->where('status', '!=', 'cancelled')
+                )->whereNotIn('status', ['cancelled'])->sum('line_total');
+
+                $order->update([
+                    'status'      => 'pending_supplier_confirmation',
+                    'total_value' => round($newTotal, 2),
+                ]);
             }
         });
 
+        $order->refresh();
+
         return response()->json([
-            'message' => 'Shortage resolved successfully.',
-            'data'    => ['order_status' => $order->fresh()->status],
-        ], 200);
+            'message' => $action === 'accept_alternatives'
+                ? 'Shortage accepted. Supplier will re-confirm the order.'
+                : 'Short items cancelled. Order confirmed with available items.',
+            'data' => [
+                'id'          => $order->id,
+                'status'      => $order->status,
+                'total_value' => $order->total_value,
+            ],
+        ]);
+    }
+
+    // ── Private helper: find order item matching a shortage report ──
+    private function findOrderItem(MasterOrder $order, $shortage): ?\App\Models\OrderItem
+    {
+        foreach ($order->supplierOrders as $so) {
+            $item = $so->orderItems->first(function ($i) use ($shortage) {
+                if ($shortage->drug_id && $i->drug_id === $shortage->drug_id) return true;
+                if ($shortage->drug_name_raw && $i->drug_name_raw === $shortage->drug_name_raw) return true;
+                return false;
+            });
+            if ($item) return $item;
+        }
+        return null;
     }
 }
