@@ -234,50 +234,27 @@ class AllocateOrderController extends Controller
             }
 
             if ($action === 'cancel_short_items') {
-                // ── Cancel short items, keep confirmed quantities ─────────
-
-                foreach ($unresolvedShortages as $shortage) {
-                    $item = $this->findOrderItem($order, $shortage);
-
-                    if ($item) {
-                        $confirmedQty = $item->quantity_confirmed ?? 0;
-                        $item->update([
-                            'quantity_requested' => $confirmedQty,
-                            'line_total'         => round($confirmedQty * $item->unit_price, 2),
-                            'status'             => $confirmedQty > 0 ? 'confirmed' : 'cancelled',
-                        ]);
+                    // Mark all shortage reports resolved
+                    foreach ($unresolvedShortages as $shortage) {
+                        $shortage->update(['resolved' => 1, 'resolution' => 'cancelled']);
                     }
 
-                    $shortage->update(['resolved' => 1, 'resolution' => 'cancelled']);
-                }
-
-                // Update each affected supplier order subtotal/status
-                foreach ($order->supplierOrders as $so) {
-                    $freshItems  = $so->orderItems()->get();
-                    $allCancelled = $freshItems->every(fn($i) => $i->status === 'cancelled');
-
-                    if ($allCancelled) {
-                        $so->update(['status' => 'cancelled']);
-                    } else {
-                        $newSubtotal = $freshItems->where('status', '!=', 'cancelled')->sum('line_total');
+                    // Cancel all order items and supplier orders
+                    foreach ($order->supplierOrders as $so) {
+                        $so->orderItems()->update(['status' => 'cancelled', 'line_total' => 0]);
                         $so->update([
-                            'subtotal'         => round($newSubtotal, 2),
-                            'commission_value' => round($newSubtotal * $so->commission_pct / 100, 2),
+                            'status'           => 'cancelled',
+                            'subtotal'         => 0,
+                            'commission_value' => 0,
                         ]);
                     }
-                }
 
-                // Recalculate master order total
-                $newTotal = $order->supplierOrders()
-                    ->where('status', '!=', 'cancelled')
-                    ->get()->sum('subtotal');
-
-                $order->update([
-                    'status'      => 'confirmed',
-                    'total_value' => round($newTotal, 2),
-                ]);
-
-            } else {
+                    // Cancel the master order
+                    $order->update([
+                        'status'      => 'cancelled',
+                        'total_value' => 0,
+                    ]);
+                } else {
                 // ── accept_alternatives: reduce quantity_requested ────────
                 // KEY FIX: set quantity_requested = accepted qty so supplier
                 // re-confirm() sees short = 0 and doesn't create new shortage
