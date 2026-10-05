@@ -208,7 +208,7 @@ class NotificationService
         }
     }
 
- public function registrationApproved(int $userId, ?string $entityType = null): void
+    public function registrationApproved(int $userId, ?string $entityType = null): void
     {
         switch ($entityType) {
             case 'zone_update':
@@ -294,6 +294,72 @@ class NotificationService
             type:           'general',
             notifiableType: 'InventoryUploadLog',
             notifiableId:   $logId,
+        );
+    }
+
+    public function shortageAcceptedByPharmacy(SupplierOrder $supplierOrder): void
+    {
+        $supplier = $supplierOrder->supplier;
+        if (! $supplier?->user?->device_token) return;
+
+        $this->send(
+            userId: $supplier->user->id,
+            title: 'تأكيد الطلب مجدداً',
+            body: "قبلت الصيدلية الكميات المتاحة للطلب #{$supplierOrder->order_number}. يرجى تأكيد الطلب مجدداً.",
+            type:'shortage_resolved',
+            notifiableType: 'SupplierOrder',
+            notifiableId:   $supplierOrder->id,
+            extra:
+            [
+                'supplier_order_id' => (string) $supplierOrder->id,
+                'master_order_id'   => (string) $supplierOrder->master_order_id,
+            ]
+        );
+    }
+
+    public function shortageCancelledByPharmacy(SupplierOrder $supplierOrder): void
+    {
+        $supplier = $supplierOrder->supplier;
+        if (! $supplier?->user?->device_token) return;
+
+        $this->send(
+            userId: $supplier->user->id,
+            title: 'إلغاء الطلب',
+            body: "ألغت الصيدلية الطلب #{$supplierOrder->order_number} بسبب نقص المخزون.",
+            type:'order_cancelled',
+            notifiableType: 'SupplierOrder',
+            notifiableId:   $supplierOrder->id,
+            extra:
+            [
+                'supplier_order_id' => (string) $supplierOrder->id,
+                'master_order_id'   => (string) $supplierOrder->master_order_id,
+            ]
+        );
+    }
+
+    public function shortageReportedBySupplier(MasterOrder $masterOrder): void
+    {
+        $masterOrder->loadMissing('pharmacyBranch.user');
+        $branch = $masterOrder->pharmacyBranch;
+        Log::info('shortageReportedBySupplier debug', [
+        'master_order_id'  => $masterOrder->id,
+        'branch'           => $branch?->id,
+        'branch_user'      => $branch?->user?->id,
+        'device_token'     => $branch?->user?->device_token ? 'SET' : 'NULL',
+    ]);
+        if (! $branch || ! $branch->user) return;
+        if (! $branch->user->device_token)  return;
+
+        $this->send(
+            userId:         $branch->user->id,
+            title:          'نقص في مخزون الطلب',
+            body:           "أفاد المورد بوجود نقص في بعض أصناف الطلب #{$masterOrder->id}. يرجى مراجعة الطلب واتخاذ القرار المناسب.",
+            type:           'shortage_reported',
+            notifiableType: 'MasterOrder',
+            notifiableId:   $masterOrder->id,
+            extra: [
+                'master_order_id' => (string) $masterOrder->id,
+            ]
         );
     }
 }

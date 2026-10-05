@@ -303,6 +303,14 @@ class AllocateOrderController extends Controller
                 ]);
             }
         });
+        // Notify each affected supplier
+        foreach ($order->supplierOrders as $so) {
+            if ($so->status === 'cancelled') {
+                $this->notifier->shortageCancelledByPharmacy($so);
+            } elseif ($so->status === 'pending') {
+                $this->notifier->shortageAcceptedByPharmacy($so);
+            }
+        }
 
         $order->refresh();
 

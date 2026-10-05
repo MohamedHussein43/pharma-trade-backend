@@ -162,6 +162,42 @@ class SupplierOrderController extends Controller
             ], 422);
         }
 
+        foreach ($request->items as $itemData) {
+            $item      = $order->orderItems->firstWhere('id', $itemData['order_item_id']);
+            if (! $item) continue;
+            $confirmed = (int)$itemData['quantity_confirmed'];
+
+            if ($confirmed > 0 && $confirmed < $item->quantity_requested) {
+                $drugName = $item->drug?->trade_name ?? $item->drug_name_raw ?? "item #{$item->id}";
+                Log::info('quantity_confirmed not correct', [
+                    
+                    'message' => 'لا يمكن تأكيد كمية جزئية. يرجى تأكيد الكمية الكاملة أو الإبلاغ عن نقص.',
+                    'errors'  => [
+                        'items' => [
+                            "الصنف \"{$drugName}\": الكمية المطلوبة {$item->quantity_requested}، " .
+                            "الكمية المؤكدة {$confirmed}. " .
+                            "إذا كان المخزون غير كافٍ، يرجى استخدام تقرير النقص أولاً.",
+                        ],
+                    ],
+                ]);
+                return response()->json([
+                    'message' => 'لا يمكن تأكيد كمية جزئية. يرجى تأكيد الكمية الكاملة أو الإبلاغ عن نقص.',
+                    'errors'  => [
+                        'items' => [
+                            "الصنف \"{$drugName}\": الكمية المطلوبة {$item->quantity_requested}، " .
+                            "الكمية المؤكدة {$confirmed}. " .
+                            "إذا كان المخزون غير كافٍ، يرجى استخدام تقرير النقص أولاً.",
+                        ],
+                    ],
+                    'data' => [
+                        'order_item_id'      => $item->id,
+                        'quantity_requested' => $item->quantity_requested,
+                        'quantity_confirmed' => $confirmed,
+                    ],
+                ], 422);
+            }
+        }
+
         // ── All validations passed — process confirmation ─────────────
         DB::transaction(function () use ($request, $order, $supplier) {
             $subtotal      = 0;
@@ -256,6 +292,11 @@ class SupplierOrderController extends Controller
     // =========================================================
     public function reportShortage(Request $request, int $id): JsonResponse
     {
+        Log::info('Incoming API Request', [
+        'method' => $request->method(),
+        'url' => $request->fullUrl(),
+        'body' => $request->all(),
+        ]);
         $supplier = $request->user()->supplier;
 
         $order = SupplierOrder::where('id', $id)
@@ -338,9 +379,12 @@ class SupplierOrderController extends Controller
 
             $this->updateMasterOrderStatus($order->master_order_id, true);
         });
+        Log::info('master order', [
+        '$order->masterOrder' => $order->masterOrder,
+        ]);
 
-        $this->notifier->orderConfirmedForPharmacy($order->fresh(), true);
-
+        $this->notifier->shortageReportedBySupplier($order->masterOrder);
+        $order->fresh();
         return response()->json([
             'message' => 'Shortage reported. Pharmacy has been notified.',
             'data'    => [
