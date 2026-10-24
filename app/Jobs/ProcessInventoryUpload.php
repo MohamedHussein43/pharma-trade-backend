@@ -13,6 +13,8 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Maatwebsite\Excel\Facades\Excel;
+use App\Services\DrugTransliterator;
+use App\Services\ArabicNormalizer;
 
 class ProcessInventoryUpload implements ShouldQueue
 {
@@ -335,54 +337,190 @@ class ProcessInventoryUpload implements ShouldQueue
 
     private function loadDrugCatalog(): array
     {
-        $drugs   = Drug::select(['id', 'name', 'trade_name', 'scientific_name', 'barcode'])->get();
-        $catalog = ['by_barcode' => [], 'by_trade' => [], 'by_name' => []];
+        $drugs = Drug::select(['id', 'name', 'trade_name', 'commercial_name_ar', 'scientific_name', 'barcode'])
+            ->get();
+
+        $catalog = [
+            'by_barcode' => [],
+            'by_trade'   => [],
+            'by_name'    => [],
+            'by_ar'      => [],   // index on commercial_name_ar
+        ];
 
         foreach ($drugs as $drug) {
-            if (! empty($drug->barcode))    $catalog['by_barcode'][strtolower($drug->barcode)]  = $drug->id;
-            if (! empty($drug->trade_name)) $catalog['by_trade'][strtolower($drug->trade_name)] = $drug->id;
-            if (! empty($drug->name))       $catalog['by_name'][strtolower($drug->name)]        = $drug->id;
+            if (! empty($drug->barcode)) {
+                $catalog['by_barcode'][strtolower($drug->barcode)] = $drug->id;
+            }
+            if (! empty($drug->trade_name)) {
+                $catalog['by_trade'][strtolower($drug->trade_name)] = $drug->id;
+            }
+            if (! empty($drug->name)) {
+                $catalog['by_name'][strtolower($drug->name)] = $drug->id;
+            }
+            if (! empty($drug->commercial_name_ar)) {
+                $catalog['by_ar'][strtolower($drug->commercial_name_ar)] = $drug->id;
+            }
         }
 
         return $catalog;
     }
 
-    private function getOrCreateDrug(string $drugName, ?string $barcode, array &$catalog, int &$newDrugsAdded): int
+
+    private function getOrCreateDrug(
+            string  $drugName,
+            ?string $barcode,
+            array   &$catalog,
+            int     &$newDrugsAdded
+        ): int
     {
         $searchName = strtolower(trim($drugName));
+        //$isArabic   = (bool) preg_match('/\p{Arabic}/u', $drugName);
+        $isArabic = ArabicNormalizer::isArabic($drugName);
 
-        if (! empty($barcode) && isset($catalog['by_barcode'][strtolower(trim($barcode))])) {
-            return $catalog['by_barcode'][strtolower(trim($barcode))];
-        }
-        if (isset($catalog['by_trade'][$searchName])) return $catalog['by_trade'][$searchName];
-        if (isset($catalog['by_name'][$searchName]))  return $catalog['by_name'][$searchName];
-
-        foreach ($catalog['by_trade'] as $tradeName => $drugId) {
-            if (str_starts_with($searchName, $tradeName) || str_starts_with($tradeName, $searchName)) {
-                return $drugId;
+        // ── Strategy 1: Barcode match (language-independent) ──
+        if (! empty($barcode)) {
+            $key = strtolower(trim($barcode));
+            if (isset($catalog['by_barcode'][$key])) {
+                return $catalog['by_barcode'][$key];
             }
         }
 
-        $firstWord = explode(' ', $searchName)[0];
-        if (strlen($firstWord) >= 4) {
+        if ($isArabic) {
+            $drugName = ArabicNormalizer::normalize($drugName);
+
+            // ── Strategy 2a: Exact Arabic name match (in-memory) ──
+            if (isset($catalog['by_ar'][$searchName])) {
+                return $catalog['by_ar'][$searchName];
+            }
+
+            // ── Strategy 3a: DB LIKE on commercial_name_ar ────────
+            $drug = \App\Models\Drug::where('commercial_name_ar', 'like', "%{$drugName}%")
+                ->first(['id', 'trade_name', 'commercial_name_ar']);
+
+            if ($drug) {
+                if (empty($drug->commercial_name_ar)) {
+                    $drug->update(['commercial_name_ar' => $drugName]);
+                }
+                $catalog['by_ar'][$searchName] = $drug->id;
+                return $drug->id;    // ← found, return immediately — no new record
+            }
+
+            // ── Strategy 4a: Transliterate → DB LIKE on trade_name ──
+            // Uses first word of transliteration as prefix.
+            // Also tries k→c / q→c variant because Arabic ك maps to both
+            // 'k' and 'c' in English pharmaceutical names
+            // (e.g. "ديكلاك" → "Diklak" → variant "Diclac" → "DICLAC 150 …")
+            $transliterated = DrugTransliterator::transliterateArabicToLatin($drugName);
+            $firstWord      = strtolower(explode(' ', $transliterated)[0]);
+
+            $variants = array_unique(array_filter([
+                $firstWord,
+                str_replace(['k', 'q'], 'c', $firstWord),   // diklak → diclac
+                str_replace('c', 'k', $firstWord),           // reverse: diclac → diklak (in case dataset uses k)
+            ]));
+
+            foreach ($variants as $prefix) {
+                if (strlen($prefix) < 3) continue;
+
+                $drug = \App\Models\Drug::where('trade_name', 'like', "{$prefix}%")
+                    ->orWhere('name', 'like', "{$prefix}%")
+                    ->first(['id', 'trade_name', 'commercial_name_ar']);
+
+                if ($drug) {
+                    // Fill Arabic name back onto existing row
+                    if (empty($drug->commercial_name_ar)) {
+                        $drug->update(['commercial_name_ar' => $drugName]);
+                    }
+                    $catalog['by_ar'][$searchName] = $drug->id;
+                    return $drug->id;    // ← found, return immediately — no new record
+                }
+            }
+
+        } else {
+
+            // ── Strategy 2b: Exact English trade/name match (in-memory) ──
+            if (isset($catalog['by_trade'][$searchName])) {
+                return $catalog['by_trade'][$searchName];
+            }
+            if (isset($catalog['by_name'][$searchName])) {
+                return $catalog['by_name'][$searchName];
+            }
+
+            // ── Strategy 3b: Partial trade name match (in-memory) ──
             foreach ($catalog['by_trade'] as $tradeName => $drugId) {
-                if (str_starts_with($tradeName, $firstWord)) return $drugId;
+                if (str_starts_with($searchName, $tradeName)
+                    || str_starts_with($tradeName, $searchName)) {
+                    return $drugId;
+                }
+            }
+
+            // ── Strategy 4b: First word match (in-memory) ─────────
+            $firstWord = explode(' ', $searchName)[0];
+            if (strlen($firstWord) >= 4) {
+                foreach ($catalog['by_trade'] as $tradeName => $drugId) {
+                    if (str_starts_with($tradeName, $firstWord)) {
+                        return $drugId;
+                    }
+                }
+            }
+
+            // ── Strategy 5b: DB LIKE on trade_name ────────────────
+            $drug = \App\Models\Drug::where('trade_name', 'like', "{$drugName}%")
+                ->orWhere('name', 'like', "{$drugName}%")
+                ->first(['id', 'trade_name', 'commercial_name_ar']);
+
+            if ($drug) {
+                if (empty($drug->trade_name)) {
+                    $drug->update(['trade_name' => $drugName, 'name' => $drugName]);
+                }
+                $catalog['by_trade'][$searchName] = $drug->id;
+                return $drug->id;
+            }
+
+            // ── Strategy 6b: Transliterate → DB LIKE on commercial_name_ar ──
+            $transliterated = DrugTransliterator::transliterateLatinToArabic($drugName);
+            $firstWordAr    = mb_substr($transliterated, 0, 4, 'UTF-8');
+            if (mb_strlen($firstWordAr, 'UTF-8') >= 3) {
+                $drug = \App\Models\Drug::where('commercial_name_ar', 'like', "%{$firstWordAr}%")
+                    ->first(['id', 'trade_name', 'commercial_name_ar']);
+
+                if ($drug) {
+                    if (empty($drug->trade_name)) {
+                        $drug->update(['trade_name' => $drugName, 'name' => $drugName]);
+                    }
+                    $catalog['by_trade'][$searchName] = $drug->id;
+                    return $drug->id;
+                }
             }
         }
 
-        $newDrug = Drug::create([
-            'name'       => $drugName,
-            'trade_name' => $drugName,
-            'is_active'  => 1,
-        ]);
+        // ── No match at all — create new drug with both languages ─
+        if ($isArabic) {
+            $english = DrugTransliterator::arabicToEnglish($drugName);
+            $newDrug = \App\Models\Drug::create([
+                'name'               => $english['value'],
+                'trade_name'         => $english['value'],
+                'commercial_name_ar' => $drugName,
+                'is_active'          => 1,
+            ]);
+            $catalog['by_ar'][$searchName]                      = $newDrug->id;
+            $catalog['by_trade'][strtolower($english['value'])] = $newDrug->id;
+        } else {
+            $arabic  = DrugTransliterator::englishToArabic($drugName);
+            $newDrug = \App\Models\Drug::create([
+                'name'               => $drugName,
+                'trade_name'         => $drugName,
+                'commercial_name_ar' => $arabic['value'],
+                'is_active'          => 1,
+            ]);
+            $catalog['by_trade'][$searchName]               = $newDrug->id;
+            $catalog['by_name'][$searchName]                = $newDrug->id;
+            $catalog['by_ar'][strtolower($arabic['value'])] = $newDrug->id;
+        }
 
-        $catalog['by_trade'][strtolower($drugName)] = $newDrug->id;
-        $catalog['by_name'][strtolower($drugName)]  = $newDrug->id;
         $newDrugsAdded++;
-
         return $newDrug->id;
     }
-
     private function flushBatch(array $batch): void
     {
         DB::table('supplier_inventory')->upsert(

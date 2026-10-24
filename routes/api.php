@@ -18,6 +18,14 @@ use App\Http\Controllers\Api\Admin\CommissionController;
 use App\Http\Controllers\Api\Admin\AdminSettingsController;
 use App\Http\Controllers\Api\Pharmacy\OrderTrackingController;
 
+use App\Http\Controllers\Api\Pharmacy\AdminMarketplaceController;
+use App\Http\Controllers\Api\Pharmacy\MarketplaceBrowseController;
+use App\Http\Controllers\Api\Pharmacy\MarketplaceCollectionController;
+use App\Http\Controllers\Api\Pharmacy\MarketplaceInventoryController;
+use App\Http\Controllers\Api\Pharmacy\MarketplaceOrderController;
+use App\Http\Controllers\Api\Pharmacy\MarketplaceSellerOrderController;
+
+
 use App\Http\Controllers\Api\Admin\NotificationController;
 
 Route::prefix('v1')->group(function () {
@@ -220,4 +228,72 @@ Route::prefix('v1')->middleware('auth:sanctum')->group(function () {
         });*/
  
     });
+
+
+                // ── Authenticated pharmacy users ─────────────────────────────────────────────
+        Route::middleware(['auth:sanctum', 'role:pharmacy'])
+            ->prefix('pharmacy/marketplace')
+            ->name('pharmacy.marketplace.')
+            ->group(function () {
+
+                // ── Inventory (seller uploads their drugs) ────────────────────────
+                Route::prefix('inventory')->name('inventory.')->group(function () {
+                    Route::get('/',         [MarketplaceInventoryController::class, 'index'])->name('index');
+                    Route::post('/',        [MarketplaceInventoryController::class, 'store'])->name('store');
+                    Route::post('/import',        [MarketplaceInventoryController::class, 'import'])->name('import');
+                    Route::delete('/{inventory}', [MarketplaceInventoryController::class, 'destroy'])->name('destroy');
+                });
+
+                // ── Seller: manage own collections ───────────────────────────────
+                Route::prefix('my-collections')->name('collections.')->group(function () {
+                    Route::get('/',                            [MarketplaceCollectionController::class, 'index'])->name('index');
+                    Route::post('/',                           [MarketplaceCollectionController::class, 'store'])->name('store');
+                    Route::get('/{collection}',                [MarketplaceCollectionController::class, 'show'])->name('show');
+                    Route::delete('/{collection}',             [MarketplaceCollectionController::class, 'destroy'])->name('destroy');
+                    Route::post('/{collection}/items',         [MarketplaceCollectionController::class, 'addItems'])->name('items');
+                    Route::post('/{collection}/publish',       [MarketplaceCollectionController::class, 'publish'])->name('publish');
+                    Route::post('/{collection}/deactivate',    [MarketplaceCollectionController::class, 'deactivate'])->name('deactivate');
+                    Route::post('/{collection}/featured-items', [MarketplaceCollectionController::class, 'setFeaturedItems'])->name('marketplace.collections.featured-items');
+                });
+
+                // ── Buyer: browse collections ─────────────────────────────────────
+                Route::prefix('browse')->name('browse.')->group(function () {
+                    Route::get('/',              [MarketplaceBrowseController::class, 'index'])->name('index');
+                    Route::get('/{collection}',  [MarketplaceBrowseController::class, 'show'])->name('show');
+                });
+
+                // ── Buyer: place and manage orders ────────────────────────────────
+                Route::prefix('orders')->name('orders.')->group(function () {
+                    Route::get('/',                             [MarketplaceOrderController::class, 'index'])->name('index');
+                    Route::post('/',                            [MarketplaceOrderController::class, 'store'])->name('store');
+                    Route::get('/{order}',                      [MarketplaceOrderController::class, 'show'])->name('show');
+                    Route::post('/{order}/set-collector',       [MarketplaceOrderController::class, 'setCollector'])->name('set-collector');
+                    Route::post('/{order}/cancel',              [MarketplaceOrderController::class, 'cancel'])->name('cancel');
+                });
+
+                // ── Seller: manage incoming orders ────────────────────────────────
+                Route::prefix('seller/orders')->name('seller.orders.')->group(function () {
+                    Route::get('/',                    [MarketplaceSellerOrderController::class, 'index'])->name('index');
+                    Route::get('/{order}',             [MarketplaceSellerOrderController::class, 'show'])->name('show');
+                    Route::post('/{order}/accept',     [MarketplaceSellerOrderController::class, 'accept'])->name('accept');
+                    Route::post('/{order}/reject',     [MarketplaceSellerOrderController::class, 'reject'])->name('reject');
+                    Route::post('/{order}/ready',      [MarketplaceSellerOrderController::class, 'markReady'])->name('ready');
+                    Route::post('/{order}/complete',   [MarketplaceSellerOrderController::class, 'complete'])->name('complete');
+                    Route::post('/{order}/cancel',     [MarketplaceSellerOrderController::class, 'cancel'])->name('cancel');
+                });
+            });
+
+        // ── Admin routes ──────────────────────────────────────────────────────────────
+        Route::middleware(['auth:sanctum', 'role:admin'])
+            ->prefix('admin/pharmacy/marketplace')
+            ->name('admin.pharmacy.marketplace.')
+            ->group(function () {
+                Route::get('/orders',                               [AdminMarketplaceController::class, 'orders'])->name('orders');
+                Route::get('/orders/{order}',                       [AdminMarketplaceController::class, 'showOrder'])->name('orders.show');
+                Route::post('/orders/{order}/force-cancel',         [AdminMarketplaceController::class, 'forceCancel'])->name('orders.force-cancel');
+                Route::get('/collections',                          [AdminMarketplaceController::class, 'collections'])->name('collections');
+                Route::post('/collections/{collection}/suspend',    [AdminMarketplaceController::class, 'suspendCollection'])->name('collections.suspend');
+            });
+
+
 });

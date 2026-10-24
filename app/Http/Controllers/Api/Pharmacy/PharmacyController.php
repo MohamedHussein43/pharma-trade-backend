@@ -13,6 +13,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use App\Services\NotificationService;
+  use App\Services\ArabicNormalizer;
 
 class PharmacyController extends Controller
 {
@@ -217,7 +218,7 @@ class PharmacyController extends Controller
         'url' => $request->fullUrl(),
         'headers' => $request->headers->all(),
         'body' => $request->all(),
-    ]);
+        ]);
         $user   = $request->user();
         $branch = $user->pharmacyBranch;
 
@@ -279,13 +280,19 @@ class PharmacyController extends Controller
 
         // ── Search filter ─────────────────────────────────────
         if ($request->filled('search')) {
-            $term = trim($request->search);
-            $query->where(function ($q) use ($term) {
-                $q->where('drug_name_raw', 'LIKE', "%{$term}%")
+            $raw  = trim($request->search);
+            // Normalize Arabic variants so اوجمينتين matches أوجمنتين etc.
+            $term = ArabicNormalizer::isArabic($raw)
+                ? ArabicNormalizer::normalize($raw)
+                : $raw;
+
+            $query->where(function ($q) use ($term, $raw) {
+                $q->where('drug_name_raw', 'LIKE', "%{$raw}%")   // keep raw for drug_name_raw
                   ->orWhereHas('drug', fn($q2) => $q2
-                      ->where('trade_name',        'LIKE', "%{$term}%")
-                      ->orWhere('name',             'LIKE', "%{$term}%")
-                      ->orWhere('scientific_name',  'LIKE', "%{$term}%")
+                      ->where('trade_name',           'LIKE', "%{$term}%")
+                      ->orWhere('name',                'LIKE', "%{$term}%")
+                      ->orWhere('scientific_name',     'LIKE', "%{$term}%")
+                      ->orWhere('commercial_name_ar',  'LIKE', "%{$term}%")
                   );
             });
         }

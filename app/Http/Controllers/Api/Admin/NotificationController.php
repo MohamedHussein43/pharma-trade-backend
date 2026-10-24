@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Notification;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 class NotificationController extends Controller
 {
@@ -16,6 +17,13 @@ class NotificationController extends Controller
     // =========================================================
     public function index(Request $request): JsonResponse
     {
+        Log::info('Notification Index Method', [
+        'method' => $request->method(),
+        'url' => $request->fullUrl(),
+        'headers' => $request->headers->all(),
+        'body' => $request->all(),
+        ]);
+
         $notifications = Notification::where('user_id', $request->user()->id)
             ->orderBy('is_read', 'asc')        // unread first
             ->orderBy('created_at', 'desc')    // newest first within each group
@@ -45,6 +53,12 @@ class NotificationController extends Controller
     // =========================================================
     public function unreadCount(Request $request): JsonResponse
     {
+        Log::info('Notification unreadCount Method', [
+        'method' => $request->method(),
+        'url' => $request->fullUrl(),
+        'headers' => $request->headers->all(),
+        'body' => $request->all(),
+        ]);
         $count = Notification::where('user_id', $request->user()->id)
             ->where('is_read', 0)
             ->count();
@@ -63,6 +77,12 @@ class NotificationController extends Controller
     // =========================================================
     public function markRead(Request $request, int $id): JsonResponse
     {
+        Log::info('Notification markRead Method', [
+        'method' => $request->method(),
+        'url' => $request->fullUrl(),
+        'headers' => $request->headers->all(),
+        'body' => $request->all(),
+        ]);
         $notification = Notification::where('id', $id)
             ->where('user_id', $request->user()->id)
             ->first();
@@ -86,6 +106,12 @@ class NotificationController extends Controller
     // =========================================================
     public function markAllRead(Request $request): JsonResponse
     {
+        Log::info('Notification Index Method', [
+        'method' => $request->method(),
+        'url' => $request->fullUrl(),
+        'headers' => $request->headers->all(),
+        'body' => $request->all(),
+        ]);
         $updated = Notification::where('user_id', $request->user()->id)
             ->where('is_read', 0)
             ->update(['is_read' => 1]);
@@ -102,6 +128,12 @@ class NotificationController extends Controller
     // =========================================================
     public function destroy(Request $request, int $id): JsonResponse
     {
+        Log::info('Notification destroy Method', [
+        'method' => $request->method(),
+        'url' => $request->fullUrl(),
+        'headers' => $request->headers->all(),
+        'body' => $request->all(),
+        ]);
         $notification = Notification::where('id', $id)
             ->where('user_id', $request->user()->id)
             ->first();
@@ -121,6 +153,12 @@ class NotificationController extends Controller
     // =========================================================
     public function destroyAll(Request $request): JsonResponse
     {
+        Log::info('Notification destroyAll Method', [
+        'method' => $request->method(),
+        'url' => $request->fullUrl(),
+        'headers' => $request->headers->all(),
+        'body' => $request->all(),
+        ]);
         $deleted = Notification::where('user_id', $request->user()->id)->delete();
 
         return response()->json([

@@ -362,6 +362,167 @@ class NotificationService
             ]
         );
     }
+// ---------------------------------------------------------------------------
+// Paste these methods into App\Services\NotificationService
+// ---------------------------------------------------------------------------
+
+    // -------------------------------------------------------------------------
+    // P2P Marketplace Notifications
+    // -------------------------------------------------------------------------
+
+     /**
+     * Notify seller branch users that a new order was received.
+     */
+    public function p2pOrderReceived(\App\Models\PharmacyOrder $order): void
+    {
+        foreach ($this->branchUsers($order->seller_branch_id) as $user) {
+            $this->send(
+                userId:         $user->id,
+                title:          'طلب جديد في السوق',
+                body:           "تم استلام طلب جديد رقم {$order->order_number}.",
+                type:           'p2p_order_received',
+                notifiableType: 'PharmacyOrder',
+                notifiableId:   $order->id,
+            );
+        }
+    }
+
+    /**
+     * Notify buyer branch users that their order was accepted.
+     */
+    public function p2pOrderAccepted(\App\Models\PharmacyOrder $order): void
+    {
+        foreach ($this->branchUsers($order->buyer_branch_id) as $user) {
+            $this->send(
+                userId:         $user->id,
+                title:          'تم قبول طلبك',
+                body:           "تم قبول الطلب رقم {$order->order_number} من قِبَل البائع.",
+                type:           'p2p_order_accepted',
+                notifiableType: 'PharmacyOrder',
+                notifiableId:   $order->id,
+            );
+        }
+    }
+
+    /**
+     * Notify buyer branch users that their order was rejected.
+     */
+    public function p2pOrderRejected(\App\Models\PharmacyOrder $order): void
+    {
+        foreach ($this->branchUsers($order->buyer_branch_id) as $user) {
+            $this->send(
+                userId:         $user->id,
+                title:          'تم رفض طلبك',
+                body:           "تم رفض الطلب رقم {$order->order_number}.",
+                type:           'p2p_order_rejected',
+                notifiableType: 'PharmacyOrder',
+                notifiableId:   $order->id,
+            );
+        }
+    }
+
+    /**
+     * Notify buyer branch users that their order is ready for pickup.
+     */
+    public function p2pOrderReady(\App\Models\PharmacyOrder $order): void
+    {
+        foreach ($this->branchUsers($order->buyer_branch_id) as $user) {
+            $this->send(
+                userId:         $user->id,
+                title:          'طلبك جاهز للاستلام',
+                body:           "الطلب رقم {$order->order_number} جاهز — يمكن لمندوبك استلامه الآن.",
+                type:           'p2p_order_ready',
+                notifiableType: 'PharmacyOrder',
+                notifiableId:   $order->id,
+            );
+        }
+    }
+
+    /**
+     * Notify both buyer and seller branch users that the order is completed.
+     */
+    public function p2pOrderCompleted(\App\Models\PharmacyOrder $order): void
+    {
+        $allUsers = $this->branchUsers($order->buyer_branch_id)
+            ->merge($this->branchUsers($order->seller_branch_id));
+
+        foreach ($allUsers as $user) {
+            $this->send(
+                userId:         $user->id,
+                title:          'اكتمل الطلب',
+                body:           "الطلب رقم {$order->order_number} اكتمل بنجاح.",
+                type:           'p2p_order_completed',
+                notifiableType: 'PharmacyOrder',
+                notifiableId:   $order->id,
+            );
+        }
+    }
+
+    /**
+     * Notify the other party on cancellation.
+     * If buyer cancelled → notify seller branch. If seller cancelled → notify buyer branch.
+     */
+    public function p2pOrderCancelled(\App\Models\PharmacyOrder $order, string $cancelledByRole): void
+    {
+        $notifyBranchId = $cancelledByRole === 'buyer'
+            ? $order->seller_branch_id
+            : $order->buyer_branch_id;
+
+        foreach ($this->branchUsers($notifyBranchId) as $user) {
+            $this->send(
+                userId:         $user->id,
+                title:          'تم إلغاء الطلب',
+                body:           "تم إلغاء الطلب رقم {$order->order_number}.",
+                type:           'p2p_order_cancelled',
+                notifiableType: 'PharmacyOrder',
+                notifiableId:   $order->id,
+            );
+        }
+    }
+
+    /**
+     * Notify buyers in the same zone(s) when a new collection becomes active.
+     */
+    public function p2pCollectionAvailable(\App\Models\PharmacyCollection $collection): void
+    {
+        $zoneIds = $collection->zone_ids ?? [];
+
+        if (empty($zoneIds)) {
+            return;
+        }
+
+        // Get users of all branches that share any zone with this collection,
+        // excluding the seller's own branch.
+        $users = \App\Models\User::whereHas('pharmacyBranch', function ($q) use ($collection, $zoneIds) {
+            $q->where('id', '!=', $collection->seller_branch_id)
+              ->whereHas('zones', fn ($z) => $z->whereIn('zone_id', $zoneIds));
+        })->get();
+
+        foreach ($users as $user) {
+            $this->send(
+                userId:         $user->id,
+                title:          'مجموعة أدوية جديدة متاحة',
+                body:           "مجموعة \"{$collection->name}\" متاحة الآن في منطقتك.",
+                type:           'p2p_collection_available',
+                notifiableType: 'PharmacyCollection',
+                notifiableId:   $collection->id,
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // Private helper
+    // ─────────────────────────────────────────────────────────
+
+    /**
+     * Get all users that belong to a given pharmacy branch.
+     * Uses the user_id FK on pharmacy_branches (one branch → one user in your schema).
+     */
+    private function branchUsers(int $branchId): \Illuminate\Support\Collection
+    {
+        return \App\Models\User::whereHas('pharmacyBranch', fn ($q) => $q->where('id', $branchId))->get();
+    }
+
 }
 
 
