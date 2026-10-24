@@ -8,16 +8,20 @@ return new class extends Migration
 {
     public function up(): void
     {
-        Schema::table('drugs', function (Blueprint $table) {
-            $table->string('commercial_name_ar')->nullable()->after('trade_name');
-            $table->text('scientific_name')->nullable();
-        });
+        if (! Schema::hasColumn('drugs', 'commercial_name_ar')) {
+            Schema::table('drugs', function (Blueprint $table) {
+                $table->string('commercial_name_ar')->nullable()->after('trade_name');
+                $table->text('scientific_name')->nullable();
+            });
+        }
     }
 
     public function down(): void
     {
         Schema::table('drugs', function (Blueprint $table) {
-            $table->dropColumn('commercial_name_ar');
+            if (Schema::hasColumn('drugs', 'commercial_name_ar')) {
+                $table->dropColumn('commercial_name_ar');
+            }
         });
     }
 };
