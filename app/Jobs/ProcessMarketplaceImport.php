@@ -15,11 +15,13 @@ use PhpOffice\PhpSpreadsheet\IOFactory;
 use App\Services\DrugTransliterator;
 use Illuminate\Support\Facades\Log;
 use App\Services\ArabicNormalizer;
+use App\Services\DrugMatcher;
 
 class ProcessMarketplaceImport implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    private array $drugCache = [];   // ← add this line
     public int $tries   = 1;
     public int $timeout = 300;
 
@@ -234,101 +236,88 @@ class ProcessMarketplaceImport implements ShouldQueue
         return trim((string)$value);
     }
 
+    
     private function resolveDrug(mixed $identifier): ?int
     {
-        if (! $identifier) {
-            return null;
-        }
+        if (! $identifier) return null;
 
         $identifier = trim((string) $identifier);
-        if (is_numeric($identifier)) return (int) $identifier;
+        if (is_numeric($identifier)) return (int) $identifier;   // drug id sent directly
 
         $isArabic = ArabicNormalizer::isArabic($identifier);
-
-        //$isArabic = (bool) preg_match('/\p{Arabic}/u', $identifier);
-
-        // ── Step 1: Direct DB match ────────────────────────────
-        $drug = \App\Models\Drug::where('trade_name',         'like', "%{$identifier}%")
-            ->orWhere('commercial_name_ar', 'like', "%{$identifier}%")
-            ->orWhere('name',               'like', "%{$identifier}%")
-            ->orWhere('scientific_name',    'like', "%{$identifier}%")
-            ->first(['id', 'trade_name', 'commercial_name_ar', 'name']);
-
-        if ($drug) {
-            if ($isArabic && empty($drug->commercial_name_ar)) {
-                $drug->update(['commercial_name_ar' => $identifier]);
-            } elseif (! $isArabic && empty($drug->trade_name)) {
-                $drug->update(['trade_name' => $identifier, 'name' => $identifier]);
-            }
-            return $drug->id;
-        }
-
-        // ── Step 2: Transliterate → prefix match ──────────────
-        // Tries the transliterated first word AND a k→c / q→c variant
-        // because Arabic ك maps to both 'k' and 'c' in brand names.
         if ($isArabic) {
             $identifier = ArabicNormalizer::normalize($identifier);
-            $transliterated = DrugTransliterator::transliterateArabicToLatin($identifier);
-            $firstWord      = strtolower(explode(' ', $transliterated)[0]);
-
-            $variants = array_unique(array_filter([
-                $firstWord,
-                str_replace(['k', 'q'], 'c', $firstWord),
-                str_replace('c', 'k', $firstWord),
-            ]));
-
-            foreach ($variants as $prefix) {
-                if (strlen($prefix) < 3) continue;
-
-                $drug = \App\Models\Drug::where('trade_name', 'like', "{$prefix}%")
-                    ->orWhere('name', 'like', "{$prefix}%")
-                    ->first(['id', 'trade_name', 'commercial_name_ar']);
-
-                if ($drug) {
-                    if (empty($drug->commercial_name_ar)) {
-                        $drug->update(['commercial_name_ar' => $identifier]);
-                    }
-                    return $drug->id;
-                }
-            }
-        } else {
-            $transliterated = DrugTransliterator::transliterateLatinToArabic($identifier);
-            $firstWordAr    = mb_substr($transliterated, 0, 4, 'UTF-8');
-
-            if (mb_strlen($firstWordAr, 'UTF-8') >= 3) {
-                $drug = \App\Models\Drug::where('commercial_name_ar', 'like', "%{$firstWordAr}%")
-                    ->first(['id', 'trade_name', 'name', 'commercial_name_ar']);
-
-                if ($drug) {
-                    if (empty($drug->trade_name)) {
-                        $drug->update(['trade_name' => $identifier, 'name' => $identifier]);
-                    }
-                    return $drug->id;
-                }
-            }
         }
 
-        // ── Step 3: Not found — create new drug with both languages ──
+        $cacheKey = mb_strtolower($identifier, 'UTF-8');
+        if (isset($this->drugCache[$cacheKey])) {
+            return $this->drugCache[$cacheKey];
+        }
+
+        $tokens = DrugMatcher::tokenize($identifier);
+        $brand  = $tokens[0] ?? '';
+        $id     = null;
+
         if ($isArabic) {
-            $english = DrugTransliterator::arabicToEnglish($identifier);
-            return \App\Models\Drug::insertGetId([
-                'name'               => $english['value'],
-                'trade_name'         => $english['value'],
-                'commercial_name_ar' => $identifier,
-                'is_active'          => true,
-                'created_at'         => now(),
-                'updated_at'         => now(),
-            ]);
+            // 1. Arabic brand prefix on commercial_name_ar → strength-checked pick
+            $id = $this->bestByBrand(['commercial_name_ar'], $brand, $tokens);
+
+            // 2. Transliterate brand → English prefix (+ k/c variants: ديكلاك → diclac)
+            if (! $id) {
+                $firstWord = strtolower(explode(' ', DrugTransliterator::transliterateArabicToLatin($brand))[0]);
+                $variants  = array_unique(array_filter([
+                    $firstWord,
+                    str_replace(['k', 'q'], 'c', $firstWord),
+                    str_replace('c', 'k', $firstWord),
+                ]));
+                foreach ($variants as $prefix) {
+                    if ($id = $this->bestByBrand(['trade_name', 'name'], $prefix, $tokens)) break;
+                }
+            }
+
+            // Fill the Arabic name onto the matched drug if it has none
+            if ($id) {
+                \App\Models\Drug::where('id', $id)
+                    ->where(fn ($q) => $q->whereNull('commercial_name_ar')->orWhere('commercial_name_ar', ''))
+                    ->update(['commercial_name_ar' => $identifier]);
+            }
+
         } else {
-            $arabic = DrugTransliterator::englishToArabic($identifier);
-            return \App\Models\Drug::insertGetId([
-                'name'               => $identifier,
-                'trade_name'         => $identifier,
-                'commercial_name_ar' => $arabic['value'],
-                'is_active'          => true,
-                'created_at'         => now(),
-                'updated_at'         => now(),
-            ]);
+            // 1. English brand prefix on trade_name / name → strength-checked pick
+            $id = $this->bestByBrand(['trade_name', 'name'], $brand, $tokens);
+
+            // 2. Transliterate → Arabic prefix → strength-checked pick
+            if (! $id) {
+                $firstWordAr = mb_substr(DrugTransliterator::transliterateLatinToArabic($brand), 0, 4, 'UTF-8');
+                $id = $this->bestByBrand(['commercial_name_ar'], $firstWordAr, $tokens);
+            }
         }
+
+        if ($id) {
+            $this->drugCache[$cacheKey] = $id;
+        }
+
+        // null → no drug with the right brand AND strength; the row is rejected
+        return $id;
+    }
+
+        /**
+     * Fetch every drug whose $columns start with $brand, then let DrugMatcher
+     * pick the one with the right strength (compared on the English trade_name).
+     */
+    private function bestByBrand(array $columns, string $brand, array $tokens): ?int
+    {
+        if (mb_strlen($brand, 'UTF-8') < 3) return null;
+
+        $candidates = \App\Models\Drug::where(function ($q) use ($columns, $brand) {
+                foreach ($columns as $col) {
+                    $q->orWhere($col, 'like', "{$brand}%");
+                }
+            })
+            ->limit(300)
+            ->get(['id', 'trade_name', 'name'])
+            ->mapWithKeys(fn ($d) => [$d->id => $d->trade_name ?: $d->name]);
+
+        return DrugMatcher::pickBest($tokens, $candidates);
     }
 }

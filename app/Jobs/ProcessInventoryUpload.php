@@ -15,6 +15,7 @@ use Illuminate\Support\Facades\Log;
 use Maatwebsite\Excel\Facades\Excel;
 use App\Services\DrugTransliterator;
 use App\Services\ArabicNormalizer;
+use App\Services\DrugMatcher;
 
 class ProcessInventoryUpload implements ShouldQueue
 {
@@ -366,18 +367,20 @@ class ProcessInventoryUpload implements ShouldQueue
     }
 
 
-    private function getOrCreateDrug(
-            string  $drugName,
-            ?string $barcode,
-            array   &$catalog,
-            int     &$newDrugsAdded
-        ): int
-    {
-        $searchName = strtolower(trim($drugName));
-        //$isArabic   = (bool) preg_match('/\p{Arabic}/u', $drugName);
+        private function getOrCreateDrug(
+        string  $drugName,
+        ?string $barcode,
+        array   &$catalog,
+        int     &$newDrugsAdded
+    ): int {
         $isArabic = ArabicNormalizer::isArabic($drugName);
 
-        // ── Strategy 1: Barcode match (language-independent) ──
+        if ($isArabic) {
+            $drugName = ArabicNormalizer::normalize($drugName);
+        }
+        $searchName = strtolower(trim($drugName));
+
+        // ── 1. Barcode (language-independent) ──────────────────
         if (! empty($barcode)) {
             $key = strtolower(trim($barcode));
             if (isset($catalog['by_barcode'][$key])) {
@@ -385,116 +388,61 @@ class ProcessInventoryUpload implements ShouldQueue
             }
         }
 
-        if ($isArabic) {
-            $drugName = ArabicNormalizer::normalize($drugName);
+        $tokens = DrugMatcher::tokenize($drugName);
+        $brand  = $tokens[0] ?? '';
+        $id     = null;
 
-            // ── Strategy 2a: Exact Arabic name match (in-memory) ──
+        if ($isArabic) {
+            // ── 2a. Exact full-name hit (in-memory) ────────────
             if (isset($catalog['by_ar'][$searchName])) {
                 return $catalog['by_ar'][$searchName];
             }
 
-            // ── Strategy 3a: DB LIKE on commercial_name_ar ────────
-            $drug = \App\Models\Drug::where('commercial_name_ar', 'like', "%{$drugName}%")
-                ->first(['id', 'trade_name', 'commercial_name_ar']);
+            // ── 3a. Arabic brand prefix → strength-checked pick ─
+            $id = $this->bestByBrand(['commercial_name_ar'], $brand, $tokens);
 
-            if ($drug) {
-                if (empty($drug->commercial_name_ar)) {
-                    $drug->update(['commercial_name_ar' => $drugName]);
+            // ── 4a. Transliterate brand → English prefix (+ k/c variants)
+            if (! $id) {
+                $firstWord = strtolower(explode(' ', DrugTransliterator::transliterateArabicToLatin($brand))[0]);
+                $variants  = array_unique(array_filter([
+                    $firstWord,
+                    str_replace(['k', 'q'], 'c', $firstWord),   // diklak → diclac
+                    str_replace('c', 'k', $firstWord),
+                ]));
+                foreach ($variants as $prefix) {
+                    if ($id = $this->bestByBrand(['trade_name', 'name'], $prefix, $tokens)) break;
                 }
-                $catalog['by_ar'][$searchName] = $drug->id;
-                return $drug->id;    // ← found, return immediately — no new record
             }
 
-            // ── Strategy 4a: Transliterate → DB LIKE on trade_name ──
-            // Uses first word of transliteration as prefix.
-            // Also tries k→c / q→c variant because Arabic ك maps to both
-            // 'k' and 'c' in English pharmaceutical names
-            // (e.g. "ديكلاك" → "Diklak" → variant "Diclac" → "DICLAC 150 …")
-            $transliterated = DrugTransliterator::transliterateArabicToLatin($drugName);
-            $firstWord      = strtolower(explode(' ', $transliterated)[0]);
+            if ($id) {
+                // Fill Arabic name onto the matched row if it has none
+                \App\Models\Drug::where('id', $id)
+                    ->where(fn ($q) => $q->whereNull('commercial_name_ar')->orWhere('commercial_name_ar', ''))
+                    ->update(['commercial_name_ar' => $drugName]);
 
-            $variants = array_unique(array_filter([
-                $firstWord,
-                str_replace(['k', 'q'], 'c', $firstWord),   // diklak → diclac
-                str_replace('c', 'k', $firstWord),           // reverse: diclac → diklak (in case dataset uses k)
-            ]));
-
-            foreach ($variants as $prefix) {
-                if (strlen($prefix) < 3) continue;
-
-                $drug = \App\Models\Drug::where('trade_name', 'like', "{$prefix}%")
-                    ->orWhere('name', 'like', "{$prefix}%")
-                    ->first(['id', 'trade_name', 'commercial_name_ar']);
-
-                if ($drug) {
-                    // Fill Arabic name back onto existing row
-                    if (empty($drug->commercial_name_ar)) {
-                        $drug->update(['commercial_name_ar' => $drugName]);
-                    }
-                    $catalog['by_ar'][$searchName] = $drug->id;
-                    return $drug->id;    // ← found, return immediately — no new record
-                }
+                return $catalog['by_ar'][$searchName] = $id;
             }
 
         } else {
+            // ── 2b. Exact full-name hit (in-memory) ────────────
+            if (isset($catalog['by_trade'][$searchName])) return $catalog['by_trade'][$searchName];
+            if (isset($catalog['by_name'][$searchName]))  return $catalog['by_name'][$searchName];
 
-            // ── Strategy 2b: Exact English trade/name match (in-memory) ──
-            if (isset($catalog['by_trade'][$searchName])) {
-                return $catalog['by_trade'][$searchName];
-            }
-            if (isset($catalog['by_name'][$searchName])) {
-                return $catalog['by_name'][$searchName];
-            }
+            // ── 3b. English brand prefix → strength-checked pick
+            $id = $this->bestByBrand(['trade_name', 'name'], $brand, $tokens);
 
-            // ── Strategy 3b: Partial trade name match (in-memory) ──
-            foreach ($catalog['by_trade'] as $tradeName => $drugId) {
-                if (str_starts_with($searchName, $tradeName)
-                    || str_starts_with($tradeName, $searchName)) {
-                    return $drugId;
-                }
+            // ── 4b. Transliterate → Arabic prefix → strength-checked pick
+            if (! $id) {
+                $firstWordAr = mb_substr(DrugTransliterator::transliterateLatinToArabic($brand), 0, 4, 'UTF-8');
+                $id = $this->bestByBrand(['commercial_name_ar'], $firstWordAr, $tokens);
             }
 
-            // ── Strategy 4b: First word match (in-memory) ─────────
-            $firstWord = explode(' ', $searchName)[0];
-            if (strlen($firstWord) >= 4) {
-                foreach ($catalog['by_trade'] as $tradeName => $drugId) {
-                    if (str_starts_with($tradeName, $firstWord)) {
-                        return $drugId;
-                    }
-                }
-            }
-
-            // ── Strategy 5b: DB LIKE on trade_name ────────────────
-            $drug = \App\Models\Drug::where('trade_name', 'like', "{$drugName}%")
-                ->orWhere('name', 'like', "{$drugName}%")
-                ->first(['id', 'trade_name', 'commercial_name_ar']);
-
-            if ($drug) {
-                if (empty($drug->trade_name)) {
-                    $drug->update(['trade_name' => $drugName, 'name' => $drugName]);
-                }
-                $catalog['by_trade'][$searchName] = $drug->id;
-                return $drug->id;
-            }
-
-            // ── Strategy 6b: Transliterate → DB LIKE on commercial_name_ar ──
-            $transliterated = DrugTransliterator::transliterateLatinToArabic($drugName);
-            $firstWordAr    = mb_substr($transliterated, 0, 4, 'UTF-8');
-            if (mb_strlen($firstWordAr, 'UTF-8') >= 3) {
-                $drug = \App\Models\Drug::where('commercial_name_ar', 'like', "%{$firstWordAr}%")
-                    ->first(['id', 'trade_name', 'commercial_name_ar']);
-
-                if ($drug) {
-                    if (empty($drug->trade_name)) {
-                        $drug->update(['trade_name' => $drugName, 'name' => $drugName]);
-                    }
-                    $catalog['by_trade'][$searchName] = $drug->id;
-                    return $drug->id;
-                }
+            if ($id) {
+                return $catalog['by_trade'][$searchName] = $id;
             }
         }
 
-        // ── No match at all — create new drug with both languages ─
+        // ── No safe match — create a new drug with both languages ─
         if ($isArabic) {
             $english = DrugTransliterator::arabicToEnglish($drugName);
             $newDrug = \App\Models\Drug::create([
@@ -521,6 +469,73 @@ class ProcessInventoryUpload implements ShouldQueue
         $newDrugsAdded++;
         return $newDrug->id;
     }
+
+        /**
+     * Fetch every drug whose $columns start with $brand, then let DrugMatcher
+     * pick the one with the right strength. Candidates are always compared on
+     * the English trade_name, because that is where the full strength lives.
+     */
+    private function bestByBrand(array $columns, string $brand, array $tokens): ?int
+    {
+        if (mb_strlen($brand, 'UTF-8') < 3) return null;
+
+        $candidates = \App\Models\Drug::where(function ($q) use ($columns, $brand) {
+                foreach ($columns as $col) {
+                    $q->orWhere($col, 'like', "{$brand}%");
+                }
+            })
+            ->limit(300)
+            ->get(['id', 'trade_name', 'name'])
+            ->mapWithKeys(fn ($d) => [$d->id => $d->trade_name ?: $d->name]);
+
+        return DrugMatcher::pickBest($tokens, $candidates);
+    }
+
+    /**
+     * Score how well an uploaded drug name matches a candidate drug name.
+     *
+     * Strategy:
+     * - Skip the first token (brand name) — both candidates share it.
+     * - For each remaining token in the uploaded name (strength, form, etc.),
+     *   award +2 if it appears exactly in the candidate, +1 if partially.
+     * - Numeric tokens (strength values like 2.5, 10, 500) are weighted double
+     *   because matching on the wrong strength is worse than matching on the wrong form.
+     *
+     * Higher score = better match.
+     */
+    private function scoreMatch(array $uploadedTokens, string $candidateName): int
+{
+    $score = 0;
+
+    // Tokenize candidate: split on spaces and common separators BUT NOT dots
+    // so that "2.5" stays as one token, not "2" and "5"
+    $candidateTokens = preg_split('/[\s\-\/,]+/', strtolower($candidateName), -1, PREG_SPLIT_NO_EMPTY);
+
+    // Strip trailing punctuation from each candidate token (e.g. "tabs." → "tabs")
+    $candidateTokens = array_map(fn($t) => rtrim($t, '.,:;)'), $candidateTokens);
+    $candidateTokens = array_filter($candidateTokens, fn($t) => strlen($t) > 0);
+
+    // Skip index 0 (brand name — already matched by prefix filter)
+    for ($i = 1; $i < count($uploadedTokens); $i++) {
+        $token  = strtolower($uploadedTokens[$i]);
+        if (strlen($token) < 1) continue;
+
+        // Numeric/decimal tokens = strength → highest weight
+        $isStrength = preg_match('/^\d+(\.\d+)?$/', $token);
+        $weight     = $isStrength ? 4 : 1;
+
+        if (in_array($token, $candidateTokens, true)) {
+            $score += 2 * $weight;   // exact token match
+        } elseif ($isStrength) {
+            // Strength token didn't match exactly → heavy penalty
+            // This prevents "2.5" from accidentally scoring against "CONCOR 10"
+            $score -= 3;
+        }
+    }
+
+    return $score;
+}
+
     private function flushBatch(array $batch): void
     {
         DB::table('supplier_inventory')->upsert(
