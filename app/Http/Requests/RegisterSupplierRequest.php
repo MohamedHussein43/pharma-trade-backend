@@ -44,6 +44,7 @@ class RegisterSupplierRequest extends FormRequest
             'licence_image_back' => ['nullable', 'file', 'mimes:jpg,jpeg,png,heic,pdf', 'max:5120'],
             // ── Push notifications ────────────────────────────
             'device_token'       => ['nullable', 'string', 'max:255'],
+            'logo' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
         ];
     }
 

@@ -17,6 +17,8 @@ use App\Models\User;
 use App\Models\RegistrationRequest;
 use App\Models\LicenceImage;
 use App\Models\Notification;
+use Illuminate\Support\Facades\Log;
+use App\Services\CloudinaryService;
 
 class AuthController extends Controller
 {
@@ -231,19 +233,38 @@ class AuthController extends Controller
     // zone_ids array is stored as JSON in the request notes
     // field until approval, when supplier_zones rows are made.
     // =========================================================
-    public function registerSupplier(RegisterSupplierRequest $request): JsonResponse
+public function registerSupplier(RegisterSupplierRequest $request): JsonResponse
     {
-        
-        
-        if (!$request->zones)
-            {
-                
-                 $request->zones = [1];
-        }  
-                
+        if (! $request->zones) {
+            $request->merge(['zones' => [1]]);
+        }
+
         try {
-            $result = DB::transaction(function () use ($request) {
- 
+            // ── Upload logo BEFORE transaction (Cloudinary is external,
+            //    no point rolling back DB if Cloudinary fails) ──────────
+            Log::info('Registration file check', [
+                'has_logo'  => $request->hasFile('logo'),
+                'all_files' => array_keys($request->allFiles()),
+                'all_keys'  => array_keys($request->all()),
+            ]);
+            $logoUrl = null;
+            if ($request->hasFile('logo')) {
+                try {
+                    $cloudinary = new CloudinaryService();
+                    // Use a temp ID since supplier record doesn't exist yet.
+                    // We'll use the registration request ID after it's created,
+                    // but we upload now and store URL in meta.
+                    // Use a timestamp-based temp key to avoid collisions.
+                    $tempKey = 'reg_' . time() . '_' . uniqid();
+                    $logoUrl = $cloudinary->uploadSupplierLogo($request->file('logo'), $tempKey);
+                } catch (\Exception $e) {
+                    // Logo upload failure should NOT block registration
+                    Log::warning('Logo upload failed during supplier registration: ' . $e->getMessage());
+                }
+            }
+
+            $result = DB::transaction(function () use ($request, $logoUrl) {
+
                 // ── Step 1: Create the user (inactive) ──
                 $user = User::create([
                     'name'         => $request->name,
@@ -255,12 +276,8 @@ class AuthController extends Controller
                     'is_active'    => 0,
                     'device_token' => $request->device_token,
                 ]);
-                
- 
+
                 // ── Step 2: Create registration request ──
-                // zone_ids stored as JSON in address field temporarily,
-                // OR add a nullable JSON column to registration_requests.
-                // Here we store them cleanly as a separate notes field.
                 $regRequest = RegistrationRequest::create([
                     'user_id'        => $user->id,
                     'entity_type'    => 'supplier',
@@ -269,39 +286,41 @@ class AuthController extends Controller
                     'licence_number' => $request->licence_number,
                     'phone'          => $request->phone,
                     'address'        => $request->address,
-                    'zone_id' => is_array($request->zones) 
-                        ? $request->zones[0] 
-                        : json_decode($request->zones)[0],        // primary zone (for display)
+                    'zone_id'        => is_array($request->zones)
+                        ? $request->zones[0]
+                        : json_decode($request->zones)[0],
                     'status'         => 'pending',
-                    'meta'           => json_encode([                  // ALL zones stored here
-                                            'zone_ids'        => $request->zones,       // ← changed from zone_ids
-                                            'min_order_value' => $request->min_order_value ?? 0,
-                                            'min_order_qty'   => $request->min_order_qty   ?? 0,
-                                        ]),
+                    'meta'           => json_encode([
+                        'zone_ids'        => $request->zones,
+                        'min_order_value' => $request->min_order_value ?? 0,
+                        'min_order_qty'   => $request->min_order_qty   ?? 0,
+                        'logo_url'        => $logoUrl,   // ← stored here until approval
+                    ]),
                 ]);
- 
+
                 // ── Step 3: Licence image ──
                 $this->storeLicenceImages($request, $regRequest->id);
- 
+
                 // ── Step 4: Notify admins ──
                 $this->notifyAllAdmins(
                     requestId: $regRequest->id,
                     title:     'New supplier licence pending review',
                     body:      "Supplier '{$request->business_name}' submitted a registration request.",
                 );
- 
+
                 return ['user' => $user, 'request' => $regRequest];
             });
- 
+
             return response()->json([
                 'message' => 'Supplier registration submitted. Your account is pending admin review.',
                 'data'    => [
                     'request_id'   => $result['request']['id'],
                     'status'       => 'pending',
                     'submitted_at' => $result['request']['created_at'],
+                    'logo_url'     => $logoUrl,   // let mobile app confirm it was received
                 ],
             ], 201);
- 
+
         } catch (\Exception $e) {
             return response()->json([
                 'message' => 'Registration failed. Please try again.',

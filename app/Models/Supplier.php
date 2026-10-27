@@ -8,8 +8,9 @@ use Illuminate\Database\Eloquent\Model;
 class Supplier extends Model
 {
     protected $fillable = [
-        'user_id',
+    'user_id',
     'name',
+    'logo_url',
     'licence_number',
     'min_order_value',
     'min_order_qty',

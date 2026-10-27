@@ -242,7 +242,7 @@ class AllocationEngine
                         'quantity_requested' => $item['quantity_requested'],
                         'unit_price'         => $altInvRow->unit_price,
                         'discount_pct'       => $altInvRow->discount_pct,
-                        'line_total'         => $newLineTotal,
+                        'line_total'         => $lineTotal,
                     ];
 
                     $foundAlt      = true;

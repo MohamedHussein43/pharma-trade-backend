@@ -11,7 +11,7 @@ return new class extends Migration
         if (! Schema::hasColumn('drugs', 'commercial_name_ar')) {
             Schema::table('drugs', function (Blueprint $table) {
                 $table->string('commercial_name_ar')->nullable()->after('trade_name');
-                $table->text('scientific_name')->nullable();
+                $table->text('scientific_name')->nullable()->change();;
             });
         }
     }

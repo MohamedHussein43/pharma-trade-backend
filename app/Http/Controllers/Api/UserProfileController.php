@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\User;
+use App\Services\CloudinaryService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -340,6 +341,31 @@ class UserProfileController extends Controller
         ], 200);
     }
 
+        public function updateLogo(Request $request): JsonResponse
+    {
+        $request->validate([
+            'logo' => ['required', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
+        ]);
+
+        $supplier = $request->user()->supplier;
+
+        if (! $supplier) {
+            return response()->json(['message' => 'Supplier not found.'], 404);
+        }
+
+        $cloudinary = new CloudinaryService();
+
+        // Upload new logo (overwrites old one in Cloudinary automatically
+        // because we use the same public_id: supplier_{id})
+        $logoUrl = $cloudinary->uploadSupplierLogo($request->file('logo'), $supplier->id);
+
+        $supplier->update(['logo_url' => $logoUrl]);
+
+        return response()->json([
+            'message'  => 'Logo updated successfully.',
+            'logo_url' => $logoUrl,
+        ], 200);
+    }
     // =========================================================
     // DELETE /api/v1/profile
     // Middleware: auth:sanctum + active.user

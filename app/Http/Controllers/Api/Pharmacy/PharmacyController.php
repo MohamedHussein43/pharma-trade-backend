@@ -186,6 +186,7 @@ class PharmacyController extends Controller
                 'supplier'  => [
                     'id'              => $supplier->id,
                     'name'            => $supplier->name,
+                    'logo_url'        => $supplier->logo_url,
                     'min_order_value' => $supplier->min_order_value,
                     'min_order_qty'   => $supplier->min_order_qty,
                 ],
@@ -267,7 +268,7 @@ class PharmacyController extends Controller
         // ── Build base query ──────────────────────────────────
         $query = \App\Models\SupplierInventory::with([
             'drug:id,name,trade_name,scientific_name,dosage_form,strength',
-            'supplier:id,name,min_order_value,min_order_qty',
+            'supplier:id,name,logo_url,min_order_value,min_order_qty',
         ])
         ->whereIn('supplier_id', $eligibleSupplierIds)
         ->whereNotNull('drug_id')
@@ -331,6 +332,7 @@ class PharmacyController extends Controller
             'supplier'           => [
                 'id'              => $item->supplier->id,
                 'name'            => $item->supplier->name,
+                'logo_url'        => $item->supplier->logo_url,
                 'min_order_value' => $item->supplier->min_order_value,
                 'min_order_qty'   => $item->supplier->min_order_qty,
             ],

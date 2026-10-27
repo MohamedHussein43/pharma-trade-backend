@@ -421,6 +421,7 @@ class AdminRegistrationController extends Controller
             'user_id'         => $req->user_id,
             'name'            => $req->business_name,
             'licence_number'  => $req->licence_number,
+            'logo_url'        => $meta['logo_url'] ?? null,
             'min_order_value' => $meta['min_order_value'] ?? 0,
             'min_order_qty'   => $meta['min_order_qty']   ?? 0,
             'approval_status' => 'approved',

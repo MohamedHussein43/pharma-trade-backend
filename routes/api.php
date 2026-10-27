@@ -157,7 +157,8 @@ Route::prefix('v1')->middleware('auth:sanctum')->group(function () {
     // ────────────────────────────────────────────────────────
     Route::middleware('role:supplier')->prefix('supplier')->group(function () {
 
-
+        //Profile
+        Route::post('profile/logo',                      [UserProfileController::class, 'updateLogo']);
         // ── Inventory CRUD ────────────────────────────────────────
         Route::get('/inventory',                         [SupplierInventoryController::class, 'index']);
         Route::post('/inventory',                        [SupplierInventoryController::class, 'store']);         // manual add
