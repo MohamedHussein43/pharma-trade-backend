@@ -269,4 +269,17 @@ class DrugController extends Controller
             'data'    => $forms,
         ], 200);
     }
+
+    public function missingEnglish(Request $request): JsonResponse
+    {
+        $drugs = Drug::where(fn ($q) => $q->whereNull('trade_name')->orWhere('trade_name', ''))
+            ->whereNotNull('commercial_name_ar')
+            ->orderByDesc('id')
+            ->paginate((int) $request->get('per_page', 20), ['id', 'commercial_name_ar', 'created_at']);
+
+        return response()->json([
+            'message' => 'Drugs missing English names.',
+            'data'    => $drugs,
+        ]);
+    }
 }

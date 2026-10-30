@@ -114,6 +114,8 @@ Route::prefix('v1')->middleware('auth:sanctum')->group(function () {
             Route::post('/drugs',              [DrugController::class, 'store']);
             Route::put('/drugs/{id}',          [DrugController::class, 'update']);
             Route::patch('/drugs/{id}/toggle', [DrugController::class, 'toggle']);
+            //Route::patch('/drugs/{id}/missing-english', [DrugController::class, 'missingEnglish']);
+            Route::get('drugs/missing-english', [DrugController::class, 'missingEnglish']);
 
             // Licence image viewer (signed URL)
             Route::get('/licences/{image}/view', [LicenceImageController::class, 'view'])

@@ -305,7 +305,7 @@ class PharmacyController extends Controller
         $rows = (clone $query)
             ->join('drugs', 'drugs.id', '=', 'supplier_inventory.drug_id')
             ->select('supplier_inventory.*')
-            ->orderBy('drugs.trade_name', 'asc')
+            ->orderByRaw('COALESCE(drugs.trade_name, drugs.commercial_name_ar) asc')
             ->orderBy('supplier_inventory.discount_pct', 'desc')
             ->orderByRaw('supplier_inventory.unit_price * (1 - supplier_inventory.discount_pct / 100) asc')
             ->offset($offset)
@@ -315,7 +315,8 @@ class PharmacyController extends Controller
         $items = $rows->map(fn($item) => [
             'inventory_id'       => $item->id,
             'drug_id'            => $item->drug_id,
-            'drug_name'          => $item->drug?->trade_name ?? $item->drug_name_raw,
+            'drug_name'          => $item->drug?->trade_name ?: ($item->drug?->commercial_name_ar ?? $item->drug_name_raw),
+            'drug_name_ar'       => $item->drug?->commercial_name_ar,
             'drug_name_raw'      => $item->drug_name_raw,
             'scientific_name'    => $item->drug?->scientific_name,
             'dosage_form'        => $item->drug?->dosage_form,

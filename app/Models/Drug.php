@@ -10,6 +10,7 @@ class Drug extends Model
         'name',
         'trade_name',
         'scientific_name',
+        'commercial_name_ar',
         'manufacturer',
         'dosage_form',
         'strength',

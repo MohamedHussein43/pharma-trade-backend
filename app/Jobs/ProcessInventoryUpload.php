@@ -23,6 +23,7 @@ class ProcessInventoryUpload implements ShouldQueue
 
     public int $tries   = 1;
     public int $timeout = 300;
+    private array $arabicOnlyDrugIds = [];
 
     public function __construct(
         private int    $supplierId,
@@ -212,6 +213,9 @@ class ProcessInventoryUpload implements ShouldQueue
             ]);
 
             $this->notifySupplier($successRows, $failedRows, $newDrugsAdded);
+           if (! empty($this->arabicOnlyDrugIds)) {
+                $this->notifyAdminsMissingEnglish($this->arabicOnlyDrugIds, $this->logId);
+            }
 
         } catch (\Exception $e) {
             Log::error("ProcessInventoryUpload FAILED: " . $e->getMessage(), [
@@ -444,7 +448,7 @@ class ProcessInventoryUpload implements ShouldQueue
 
         // ── No safe match — create a new drug with both languages ─
         if ($isArabic) {
-            $english = DrugTransliterator::arabicToEnglish($drugName);
+           /* $english = DrugTransliterator::arabicToEnglish($drugName);
             $newDrug = \App\Models\Drug::create([
                 'name'               => $english['value'],
                 'trade_name'         => $english['value'],
@@ -452,7 +456,16 @@ class ProcessInventoryUpload implements ShouldQueue
                 'is_active'          => 1,
             ]);
             $catalog['by_ar'][$searchName]                      = $newDrug->id;
-            $catalog['by_trade'][strtolower($english['value'])] = $newDrug->id;
+            $catalog['by_trade'][strtolower($english['value'])] = $newDrug->id;*/
+            // Arabic only — admins will write the English name by hand
+            $newDrug = \App\Models\Drug::create([
+                'name'               => null,
+                'trade_name'         => null,
+                'commercial_name_ar' => $drugName,      // already normalized at the top
+                'is_active'          => 1,
+            ]);
+            $catalog['by_ar'][$searchName] = $newDrug->id;
+            $this->arabicOnlyDrugIds[]     = $newDrug->id;
         } else {
             $arabic  = DrugTransliterator::englishToArabic($drugName);
             $newDrug = \App\Models\Drug::create([
@@ -479,18 +492,27 @@ class ProcessInventoryUpload implements ShouldQueue
     {
         if (mb_strlen($brand, 'UTF-8') < 3) return null;
 
-        $candidates = \App\Models\Drug::where(function ($q) use ($columns, $brand) {
+        $rows = \App\Models\Drug::where(function ($q) use ($columns, $brand) {
                 foreach ($columns as $col) {
                     $q->orWhere($col, 'like', "{$brand}%");
                 }
             })
             ->limit(300)
-            ->get(['id', 'trade_name', 'name'])
-            ->mapWithKeys(fn ($d) => [$d->id => $d->trade_name ?: $d->name]);
+            ->get(['id', 'trade_name', 'name', 'commercial_name_ar']);
 
-        return DrugMatcher::pickBest($tokens, $candidates);
+        // Pass 1: full catalog rows (have English trade_name)
+        $full = $rows->filter(fn ($d) => ! empty($d->trade_name))
+                     ->mapWithKeys(fn ($d) => [$d->id => $d->trade_name]);
+        if ($id = DrugMatcher::pickBest($tokens, $full)) {
+            return $id;
+        }
+
+        // Pass 2: Arabic-only rows waiting for admin English
+        $arOnly = $rows->filter(fn ($d) => empty($d->trade_name) && ! empty($d->commercial_name_ar))
+                       ->mapWithKeys(fn ($d) => [$d->id => $d->commercial_name_ar]);
+
+        return DrugMatcher::pickBest($tokens, $arOnly);
     }
-
     /**
      * Score how well an uploaded drug name matches a candidate drug name.
      *
@@ -559,6 +581,7 @@ class ProcessInventoryUpload implements ShouldQueue
             ->exists();
     }
 
+
     private function notifySupplier(int $success, int $failed, int $newDrugs): void
     {
         $supplier = Supplier::with('user')->find($this->supplierId);
@@ -584,5 +607,30 @@ class ProcessInventoryUpload implements ShouldQueue
             notifiableType: 'InventoryUploadLog',
             notifiableId:   $this->logId,
         );
+    }
+    private function notifyAdminsMissingEnglish(array $drugIds, int $uploadLogId): void
+    {
+        $count  = count($drugIds);
+        $admins = \App\Models\User::where('role', 'admin')->where('is_active', 1)->pluck('id');
+
+        if ($admins->isEmpty()) return;
+
+        $service = app(\App\Services\NotificationService::class);
+
+        foreach ($admins as $adminId) {
+            try {
+                $service->send(
+                    userId:         $adminId,
+                    title:          'أدوية جديدة تحتاج اسم إنجليزي',
+                    body:           "تم إضافة {$count} دواء جديد من ملف عربي بدون اسم إنجليزي. برجاء إضافة الأسماء الإنجليزية.",
+                    type:           'general',
+                    notifiableType: 'InventoryUploadLog',
+                    notifiableId:   $uploadLogId,
+                );
+            } catch (\Throwable $e) {
+                // A failed notification must never fail the upload job
+                Log::warning("Missing-English notification failed for admin {$adminId}: " . $e->getMessage());
+            }
+        }
     }
 }
